@@ -1,0 +1,11 @@
+*.pt
+__pycache__/
+validation_results/
+datasets/
+models/
+runs/
+Clips/
+src/clips/
+src/forensic_journal.json
+Archive/
+temp_*.mp4

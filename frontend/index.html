@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HASHTAGS // SURV-CMD</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <script>
+      window.addEventListener('error', function(e) {
+        document.body.innerHTML += '<div style="color: red; padding: 20px; font-size: 20px; z-index: 999999; position: absolute; background: black;"><b>ERROR:</b> ' + e.message + '<br/>' + e.filename + ':' + e.lineno + '<br/><pre>' + (e.error ? e.error.stack : '') + '</pre></div>';
+      });
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

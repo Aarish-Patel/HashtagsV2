@@ -1,0 +1,17 @@
+# HashtagV2 — Border Intrusion Detection System
+# Core AI & Computer Vision
+ultralytics>=8.2.0
+opencv-python>=4.10.0
+numpy>=1.26.0
+torch>=2.3.0
+torchvision>=0.18.0
+sahi>=0.11.0
+scikit-learn>=1.4.0
+Pillow>=10.0.0
+
+# Backend Web Server
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# System Monitoring
+psutil>=5.9.0

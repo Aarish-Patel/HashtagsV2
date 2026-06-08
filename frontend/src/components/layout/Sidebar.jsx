@@ -1,0 +1,231 @@
+import React, { useState } from 'react';
+import X from 'lucide-react/dist/esm/icons/x';
+import Plus from 'lucide-react/dist/esm/icons/plus';
+import Edit2 from 'lucide-react/dist/esm/icons/edit-2';
+import Send from 'lucide-react/dist/esm/icons/send';
+import PlayCircle from 'lucide-react/dist/esm/icons/play-circle';
+import CheckCircle from 'lucide-react/dist/esm/icons/check-circle';
+import { API_BASE } from '../../config';
+
+const NodeAlerts = ({ entities }) => {
+  // Group entities by node
+  const nodesInAlert = [...new Set(entities.map(e => e.camera || 'UNKNOWN_NODE'))];
+  
+  if (nodesInAlert.length === 0) return null;
+
+  return (
+    <div className="flex flex-col mt-4 px-5">
+      <div className="flex justify-between items-center mb-2 border-b border-red-500/20 pb-1 opacity-80">
+         <h3 className="text-[9px] font-black tracking-[0.4em] text-[#FF3B3B] uppercase">NODE ALERTS</h3>
+         <span className="text-[10px] text-[#FF3B3B] font-black tabular-nums animate-pulse">{nodesInAlert.length}</span>
+      </div>
+      <div className="flex flex-col gap-2">
+        {nodesInAlert.map(nodeId => (
+           <div key={nodeId} className="bg-[#FF3B3B]/10 border border-[#FF3B3B]/30 p-2 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                 <div className="w-1.5 h-1.5 rounded-full bg-[#FF3B3B] animate-ping" />
+                 <span className="text-[10px] font-black tracking-widest text-[#FF3B3B] uppercase">{nodeId}</span>
+              </div>
+              <span className="text-[8px] text-red-400 font-bold uppercase tracking-wider">Active Intrusion</span>
+           </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const CurrentAlerts = ({ incidents, nodes }) => {
+  const [ackedClips, setAckedClips] = useState([]);
+
+  // Acknowledge clip
+  const handleAck = (id, e) => {
+    e.stopPropagation();
+    setAckedClips([...ackedClips, id]);
+  };
+  
+  const handleOpenFolder = async () => {
+    try {
+      await fetch(`${API_BASE}/api/open_clips_folder`, { method: 'POST' });
+    } catch (e) {
+      console.error("Failed to open clips folder", e);
+    }
+  };
+
+  // If no incidents, we can show a placeholder or empty list
+  const displayClips = incidents && incidents.length > 0 ? incidents : []; 
+
+  const activeClips = displayClips.filter(c => !ackedClips.includes(c.clip_file || c.filename || c.id));
+
+  return (
+    <div className="flex flex-col mt-4 px-5 mb-4">
+      <div className="flex justify-between items-center mb-3 border-b border-white/5 pb-1 opacity-90 gap-2">
+         <h3 className="text-[9px] font-black tracking-[0.4em] text-[#00F5FF] uppercase">CURRENT ALERTS</h3>
+         <button onClick={handleOpenFolder} className="text-[7px] bg-[#00F5FF]/10 text-[#00F5FF] border border-[#00F5FF]/30 px-2 py-0.5 hover:bg-[#00F5FF]/20 uppercase font-black transition-colors shrink-0">
+           OPEN SAVED CLIPS
+         </button>
+      </div>
+      <div className="flex flex-col gap-2 max-h-[300px] overflow-y-auto custom-scrollbar pr-1">
+        {activeClips.length === 0 && <div className="text-[9px] text-[#94A3B8]/40 font-black tracking-widest uppercase py-4">ALL ALERTS ACKNOWLEDGED</div>}
+        {activeClips.map((clip, i) => {
+          const rep = clip.report || {};
+          const clipId = clip.filename || `INC-${i}`;
+          
+          // Use node_id from report to look up the node details directly
+          const nodeId = rep.node_id || (clip.filename ? clip.filename.split('_')[0] : 'UNKNOWN');
+          const node = nodes?.find(n => n.id === nodeId);
+          
+          const nodeName = node?.name || nodeId;
+          const nodeLoc = node ? `${node.lat}, ${node.lng}` : 'LOCATION UNAVAILABLE';
+          
+          // Format time safely
+          let timeStr = 'UNKNOWN TIME';
+          if (rep.timestamp) {
+             const d = new Date(rep.timestamp);
+             if (!isNaN(d.getTime())) timeStr = d.toLocaleString();
+          } else if (clip.time) {
+             timeStr = clip.time;
+          }
+          
+          const entityCount = rep.entity_count || clip.entity_count || 0;
+          const isHighThreat = rep.weapons_detected || clip.weapons_detected || (rep.max_threat_level >= 3);
+          
+          return (
+            <div key={clipId} className="group relative bg-[#030B17]/40 border border-white/5 p-2 flex flex-col gap-1.5 hover:border-[#00F5FF]/30 transition-all cursor-pointer overflow-hidden">
+               {/* Base info */}
+               <div className="flex justify-between items-start transition-opacity duration-200 group-hover:opacity-5">
+                 <div className="flex flex-col gap-0.5">
+                   <span className="text-[10px] font-black text-[#E2E8F0] tracking-widest uppercase leading-none">{clipId}</span>
+                   <span className="text-[9px] font-bold text-slate-400 tracking-wider uppercase mt-1">{timeStr}</span>
+                   <span className="text-[8px] font-bold text-[#00F5FF] tracking-wider uppercase">{nodeName} — {nodeLoc}</span>
+                   <span className="text-[7px] font-black text-[#94A3B8] tracking-widest uppercase mt-1">
+                     {entityCount} ENTITIES {rep.weapons_detected ? ' | WEAPON DETECTED' : ''}
+                   </span>
+                 </div>
+                 <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${isHighThreat ? 'bg-[#FF3B3B]' : 'bg-[#FFD60A]'}`} />
+               </div>
+               
+               {/* Hover Overlay with 3 Buttons */}
+               <div className="absolute inset-0 bg-[#00F5FF]/5 backdrop-blur-sm flex items-center justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-1">
+                 <button className="flex-1 h-full bg-[#030B17] border border-[#00F5FF]/30 text-[#00F5FF] flex items-center justify-center gap-1 text-[7px] font-black uppercase tracking-widest hover:bg-[#00F5FF]/20 transition-colors">
+                   <PlayCircle size={10} /> PLAY
+                 </button>
+                 <button onClick={(e) => handleAck(clipId, e)} className="flex-1 h-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center gap-1 text-[7px] font-black uppercase tracking-widest hover:bg-emerald-500/20 transition-colors">
+                   <CheckCircle size={10} /> ACK
+                 </button>
+                 <button className="flex-1 h-full bg-[#FF3B3B]/10 border border-[#FF3B3B]/30 text-[#FF3B3B] flex items-center justify-center gap-1 text-[7px] font-black uppercase tracking-widest hover:bg-[#FF3B3B]/20 transition-colors">
+                   <Send size={10} /> ESCALATE
+                 </button>
+               </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+const NodeManager = ({ nodes, setNodes }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [formData, setFormData] = useState({ id: '', name: '', lat: '', lng: '', ip: '' });
+
+  const handleSave = () => {
+    if (!formData.name || !formData.lat || !formData.lng || !formData.ip) return;
+    if (!formData.id) {
+       setNodes([...nodes, { ...formData, id: `HASH-${nodes.length + 1}`, lat: parseFloat(formData.lat), lng: parseFloat(formData.lng) }]);
+    } else {
+       setNodes(nodes.map(n => n.id === formData.id ? { ...formData, lat: parseFloat(formData.lat), lng: parseFloat(formData.lng) } : n));
+    }
+    setIsEditing(false);
+  };
+
+  return (
+    <div className="px-5 flex flex-col mb-4">
+      <div className="flex justify-between items-center mb-2 border-b border-white/5 pb-1 opacity-80">
+         <h3 className="text-[9px] font-black tracking-[0.3em] text-[#00F5FF] uppercase">HASHTAG NODES</h3>
+         {!isEditing && (
+           <button onClick={() => { setFormData({ id: '', name: '', lat: '', lng: '', ip: '' }); setIsEditing(true); }} className="text-[#00F5FF] hover:text-white transition-colors">
+             <Plus size={12} />
+           </button>
+         )}
+      </div>
+
+      {isEditing ? (
+        <div className="bg-[#030B17]/80 border border-[#00F5FF]/20 p-2 flex flex-col gap-2">
+           <input className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white placeholder-slate-600 outline-none focus:border-[#00F5FF]/50" placeholder="Node Name (e.g. Tiger Chongjan)" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
+           <input className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white placeholder-slate-600 outline-none focus:border-[#00F5FF]/50" placeholder="Latitude (e.g. 24.165)" value={formData.lat} onChange={e => setFormData({...formData, lat: e.target.value})} />
+           <input className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white placeholder-slate-600 outline-none focus:border-[#00F5FF]/50" placeholder="Longitude (e.g. 94.259)" value={formData.lng} onChange={e => setFormData({...formData, lng: e.target.value})} />
+           <input className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white placeholder-slate-600 outline-none focus:border-[#00F5FF]/50" placeholder="Stream IP (e.g. 192.168.1.50)" value={formData.ip} onChange={e => setFormData({...formData, ip: e.target.value})} />
+           <div className="flex gap-2 mt-1">
+             <button onClick={handleSave} className="flex-1 bg-[#00F5FF]/20 text-[#00F5FF] border border-[#00F5FF]/30 text-[9px] py-1.5 font-black uppercase tracking-widest hover:bg-[#00F5FF]/30 transition-colors">SAVE</button>
+             <button onClick={() => setIsEditing(false)} className="flex-1 bg-slate-800 text-slate-400 border border-slate-700 text-[9px] py-1.5 font-black uppercase tracking-widest hover:text-white transition-colors">CANCEL</button>
+           </div>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-1.5 max-h-[250px] overflow-y-auto custom-scrollbar pr-1">
+          {nodes.map(n => (
+            <div key={n.id} className="bg-[#030B17]/40 border border-[#E2E8F0]/5 p-2 flex flex-col gap-1 group hover:border-[#00F5FF]/30 transition-colors">
+              <div className="flex justify-between items-center">
+                 <div className="flex items-center gap-1.5">
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#00FF9C] shadow-[0_0_5px_#00FF9C88]" />
+                    <span className="text-[9px] font-black text-[#E2E8F0] tracking-widest uppercase">{n.name}</span>
+                 </div>
+                 <button onClick={() => { setFormData(n); setIsEditing(true); }} className="opacity-0 group-hover:opacity-100 text-[#00F5FF] hover:text-white transition-opacity">
+                    <Edit2 size={10} />
+                 </button>
+              </div>
+              <div className="flex justify-between text-[7px] font-black text-[#94A3B8]/60 uppercase tracking-wider">
+                 <span>{n.lat}, {n.lng}</span>
+                 <span>IP: {n.ip}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const Sidebar = ({ entities, incidents, nodes, setNodes, sidebarOpen, setSidebarOpen }) => {
+  return (
+    <>
+      {/* MOBILE OVERLAY */}
+      {sidebarOpen && (
+        <div 
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[55] lg:hidden transition-opacity animate-in fade-in duration-300"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      <aside className={`
+        fixed lg:static top-0 right-0 h-full lg:h-auto 
+        w-[320px] lg:w-[340px] shrink-0 
+        z-[60] lg:z-auto
+        bg-[#030B17] border-l border-[#00F5FF]/10 
+        flex flex-col overflow-y-auto custom-scrollbar 
+        transition-transform duration-500 ease-in-out
+        ${sidebarOpen ? 'translate-x-0' : 'translate-x-full lg:translate-x-0'}
+      `}>
+         
+         <div className="lg:hidden flex items-center justify-between p-4 border-b border-white/5 bg-[#00F5FF]/5">
+            <span className="text-[#00F5FF] text-[10px] font-black tracking-widest uppercase">TARGET_MONITOR</span>
+            <button onClick={() => setSidebarOpen(false)} className="text-[#94A3B8] hover:text-[#E2E8F0]">
+               <X size={20} />
+            </button>
+         </div>
+
+         {/* 1. NODE ALERTS */}
+         <NodeAlerts entities={entities} />
+
+         {/* 2. CURRENT ALERTS */}
+         <CurrentAlerts incidents={incidents} nodes={nodes} />
+
+         <div className="mt-auto pt-2">
+            {/* 3. NODE MANAGER */}
+            <NodeManager nodes={nodes} setNodes={setNodes} />
+         </div>
+      </aside>
+    </>
+  );
+};
+
+export default Sidebar;

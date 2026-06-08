@@ -1,0 +1,511 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import Header from './components/layout/Header';
+import Sidebar from './components/layout/Sidebar';
+import Footer from './components/layout/Footer';
+import Terminal from './components/layout/Terminal';
+import LiveFeed from './components/tabs/LiveFeed';
+import EntityTracker from './components/tabs/EntityTracker';
+import AlertHistory from './components/tabs/AlertHistory';
+import StorageView from './components/tabs/StorageView';
+import TacticalMap from './components/tabs/TacticalMap';
+import Monitor from 'lucide-react/dist/esm/icons/monitor';
+import Activity from 'lucide-react/dist/esm/icons/activity';
+import Map from 'lucide-react/dist/esm/icons/map';
+import { API_BASE } from './config';
+
+// ────────────────────────────────────────────────────────────
+// ANALYSIS STATE MACHINE
+//   STANDBY   → feeds are clean, no ML running
+//   ANALYZING → SPACEBAR pressed, ML running on buffered clip
+//   THREAT    → threat confirmed, replay shown + alarm
+//   CLEAR     → no threat, brief "SECTOR CLEAR" shown
+// ────────────────────────────────────────────────────────────
+const MODE = {
+  STANDBY:   'STANDBY',
+  ANALYZING: 'ANALYZING',
+  THREAT:    'THREAT',
+  CLEAR:     'CLEAR',
+};
+
+// Web Audio buzzer (browser-side backup for Python winsound)
+function playBrowserBuzzer(threatLevel) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const freqs = threatLevel >= 4 ? [1200, 1000, 1200, 1000, 1200]
+                : threatLevel >= 3 ? [900, 700, 900]
+                : [700];
+    freqs.forEach((f, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = f;
+      osc.type = 'square';
+      gain.gain.setValueAtTime(0.15, ctx.currentTime + i * 0.28);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + i * 0.28 + 0.22);
+      osc.start(ctx.currentTime + i * 0.28);
+      osc.stop(ctx.currentTime + i * 0.28 + 0.24);
+    });
+  } catch (e) { /* browser may block without user gesture */ }
+}
+
+export default function App() {
+  // ── Core state ──────────────────────────────────────────────
+  const [activeTab, setActiveTab]       = useState('TACTICAL MAP');
+  const [time, setTime]                 = useState('');
+  const [uptime, setUptime]             = useState(0);
+  const [sensors, setSensors]           = useState([]);
+  const [beacons, setBeacons]           = useState([]);
+  const [system, setSystem]             = useState({ cpu: 0, memory: 0, disk: 0, gpu: 0 });
+  const [logs, setLogs]                 = useState([]);
+  const [alerts, setAlerts]             = useState([]);
+  const [incidents, setIncidents]       = useState([]);
+  const [nodes, setNodes] = useState(() => {
+    const saved = localStorage.getItem('tactical_nodes');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) {}
+    }
+    return [
+      { id: 'HASH-1', name: 'Tiger Chongjan', lat: 24.165566, lng: 94.259984, ip: '192.168.0.200' },
+      { id: 'HASH-2', name: 'Pangal Sangjai', lat: 24.180, lng: 94.260, ip: '127.0.0.1' }
+    ];
+  });
+
+  useEffect(() => {
+    localStorage.setItem('tactical_nodes', JSON.stringify(nodes));
+    // Sync to backend so it connects to the new streams immediately
+    nodes.forEach(n => {
+      if (n.ip) {
+        const stream_url = n.ip.startsWith('http') ? n.ip : `http://${n.ip}/stream`;
+        fetch(`${API_BASE}/api/nodes/add`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: n.id, stream_url, name: n.name, lat: n.lat, lng: n.lng })
+        }).catch(() => {});
+      }
+    });
+  }, [nodes]);
+
+  // ── Analysis state machine ───────────────────────────────────
+  const [mode, setMode]                 = useState(MODE.STANDBY);
+  const [analysisJobs, setAnalysisJobs] = useState([]); // [{job_id, node_id, status, ...}]
+  const [threatEntities, setThreatEntities] = useState([]); // confirmed threat entities
+  const [replayUrls, setReplayUrls]     = useState({});    // node_id → replay MJPEG URL
+  const [clearTimer, setClearTimer]     = useState(null);
+
+  // ── Polling ref to avoid stale closures ─────────────────────
+  const analysisJobsRef = useRef([]);
+  analysisJobsRef.current = analysisJobs;
+  const modeRef = useRef(MODE.STANDBY);
+  modeRef.current = mode;
+
+  // ── Clock ────────────────────────────────────────────────────
+  useEffect(() => {
+    const t = setInterval(() => {
+      setTime(new Date().toLocaleTimeString('en-GB'));
+      setUptime(u => u + 1);
+    }, 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const formatUptime = (secs) => {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = Math.floor(secs % 60);
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  };
+
+  // ── Fetch system status (sensors, events) ───────────────────
+  const fetchStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/status`);
+      const data = await res.json();
+      setSensors(data.sensors || []);
+      setSystem(prev => ({ ...prev, ...data.system }));
+      setBeacons((data.sensors || []).map((s, i) => ({
+        id: `NODE-${i+1}`,
+        label: s.online ? 'ACTIVE' : 'OFFLINE',
+        fps: s.online ? (s.fps || 5) : 0,
+      })));
+
+      const evtRes = await fetch(`${API_BASE}/api/events?limit=200`);
+      const evtData = await evtRes.json();
+      const parsedLogs = evtData.slice(0, 60).map(e => ({
+        time: `[${e.ts_str || '??:??:??'}]`,
+        txt: `${e.type || 'EVENT'}: ${e.description || ''}`,
+        color: (e.threat_level >= 4) ? 'text-[#FF3B3B]'
+             : (e.threat_level >= 3) ? 'text-[#FFD60A]'
+             : 'text-[#00F5FF]',
+      }));
+      setLogs(parsedLogs.reverse());
+    } catch (e) { /* backend offline */ }
+  }, []);
+
+  const fetchIncidents = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/clips`);
+      if (res.ok) setIncidents(await res.json());
+    } catch (e) {}
+  }, []);
+
+  useEffect(() => {
+    fetchStatus();
+    const t = setInterval(fetchStatus, 500); // Fast polling for instant stream appearance
+    return () => clearInterval(t);
+  }, [fetchStatus]);
+
+  useEffect(() => {
+    fetchIncidents();
+    const t = setInterval(fetchIncidents, 2000);
+    return () => clearInterval(t);
+  }, [fetchIncidents]);
+
+  // ── Poll for Auto-Generated Jobs & Active Jobs ────────────────────────────────
+  const [lastSeenJobId, setLastSeenJobId] = useState(null);
+
+  useEffect(() => {
+    const pollJobs = async () => {
+      if (modeRef.current === MODE.THREAT || modeRef.current === MODE.CLEAR) return;
+      
+      try {
+        const res = await fetch(`${API_BASE}/api/analyze/all`);
+        const data = await res.json();
+        const jobs = data.jobs || [];
+        if (jobs.length === 0) return;
+
+        // If we are in STANDBY, check if an auto-job was created
+        if (modeRef.current === MODE.STANDBY) {
+            const latestJob = jobs[jobs.length - 1];
+            if (latestJob.job_id !== lastSeenJobId) {
+                setLastSeenJobId(latestJob.job_id);
+                // ONLY trigger if the backend specifically flagged it as an auto-trigger
+                if (latestJob.is_auto_trigger) {
+                    setAnalysisJobs([latestJob]);
+                    setMode(MODE.ANALYZING);
+                    
+                    setLogs(prev => [{
+                        time: `[${new Date().toLocaleTimeString('en-GB')}]`,
+                        txt: `AUTO_TRIGGER — Node ${latestJob.node_id} wake-up analysis started`,
+                        color: 'text-[#00F5FF]'
+                    }, ...prev.slice(0, 59)]);
+                }
+            }
+            return;
+        }
+
+        // If we are in ANALYZING mode, we update the status of the jobs we know about
+        if (modeRef.current === MODE.ANALYZING) {
+            const currentJobIds = analysisJobsRef.current.map(j => j.job_id);
+            const activeServerJobs = jobs.filter(j => currentJobIds.includes(j.job_id));
+            
+            if (activeServerJobs.length > 0) {
+                setAnalysisJobs(activeServerJobs);
+                
+                const allDone = activeServerJobs.every(j => j.status === 'COMPLETE' || j.status === 'CLEAR' || j.status === 'ERROR');
+                if (allDone) {
+                    const threatJobs = activeServerJobs.filter(j => j.threat_detected);
+
+                    if (threatJobs.length > 0) {
+                        // THREAT CONFIRMED
+                        const allEntities = threatJobs.flatMap(j => 
+                            (j.entities || []).map(ent => ({ ...ent, camera: j.node_id }))
+                        );
+                        const maxThreat = Math.max(...threatJobs.map(j => j.max_threat_level || 0));
+                        const urls = {};
+                        threatJobs.forEach(j => {
+                            // Using clip_url (.mp4) instead of replay_url (MJPEG) because TacticalMap uses a <video> tag
+                            if (j.clip_url) urls[j.node_id] = j.clip_url;
+                            else if (j.replay_url) urls[j.node_id] = j.replay_url;
+                        });
+
+                        setThreatEntities(allEntities);
+                        setReplayUrls(urls);
+                        setMode(MODE.THREAT);
+                        playBrowserBuzzer(maxThreat);
+                        fetchIncidents();
+
+                        setAlerts(prev => [{
+                            id: `JOB-${Date.now()}`,
+                            level: maxThreat >= 4 ? 'danger' : 'warning',
+                            time: new Date().toLocaleTimeString(),
+                            txt: `THREAT CONFIRMED — ${allEntities.length} entities | L${maxThreat}`,
+                            score: maxThreat * 25,
+                        }, ...prev.slice(0, 49)]);
+                    } else {
+                        // NO THREAT (Silently go back to standby, no SECTOR CLEAR required unless there is a problem)
+                        setMode(MODE.STANDBY);
+                        setAnalysisJobs([]);
+                    }
+                }
+            } else {
+                // The jobs we were tracking vanished from the server (e.g., backend restarted)
+                setMode(MODE.STANDBY);
+                setAnalysisJobs([]);
+            }
+        }
+      } catch (e) {
+      }
+    };
+
+    const interval = setInterval(pollJobs, 800);
+    return () => clearInterval(interval);
+  }, [lastSeenJobId, fetchIncidents]);
+
+  // ── SPACEBAR handler ─────────────────────────────────────────
+  const triggerAnalysis = useCallback(async () => {
+    if (modeRef.current === MODE.ANALYZING) return; // Already running
+
+    // Reset any previous results
+    if (clearTimer) clearTimeout(clearTimer);
+    setThreatEntities([]);
+    setReplayUrls({});
+    setAnalysisJobs([]);
+    setMode(MODE.ANALYZING);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/analyze`, { method: 'POST' });
+      const data = await res.json();
+      const jobs = (data.job_ids || []).map(jid => ({
+        job_id: jid, status: 'QUEUED', progress: 0,
+        threat_detected: false, entities: [],
+      }));
+      setAnalysisJobs(jobs);
+      
+      // Update lastSeenJobId so pollJobs doesn't think this is a new auto-trigger
+      if (jobs.length > 0) {
+        setLastSeenJobId(jobs[jobs.length - 1].job_id);
+      }
+
+      // Add to log
+      setLogs(prev => [{
+        time: `[${new Date().toLocaleTimeString('en-GB')}]`,
+        txt: `ANALYSIS TRIGGERED — ${data.node_count} nodes | ${data.job_ids?.length} jobs queued`,
+        color: 'text-[#00F5FF]'
+      }, ...prev.slice(0, 59)]);
+    } catch (e) {
+      console.error('Analyze trigger failed:', e);
+      setMode(MODE.STANDBY);
+    }
+  }, [clearTimer]);
+
+  const simulateThreat = useCallback(async () => {
+    if (modeRef.current === MODE.ANALYZING) return;
+    
+    if (clearTimer) clearTimeout(clearTimer);
+    setThreatEntities([]);
+    setReplayUrls({});
+    setAnalysisJobs([]);
+    setMode(MODE.ANALYZING);
+
+    try {
+      // Create a dummy job simulating a 2-second analysis that results in a threat
+      const dummyJobId = `SIM-${Date.now()}`;
+      setAnalysisJobs([{
+        job_id: dummyJobId, status: 'QUEUED', progress: 0,
+        threat_detected: false, entities: []
+      }]);
+      
+      setLogs(prev => [{
+        time: `[${new Date().toLocaleTimeString('en-GB')}]`,
+        txt: `SIMULATION TRIGGERED — Initiating mock threat detection`,
+        color: 'text-[#FFD60A]'
+      }, ...prev.slice(0, 59)]);
+
+      // After 1.5 seconds, force threat state
+      setTimeout(() => {
+        const dummyThreat = {
+            id: 9999, class: 'Person', confidence: 0.99,
+            threat_level: 4, threat_score: 99,
+            distance_m: 50, behavior: 'SIMULATED INTRUSION',
+            camera: 'CAM-SIM-01'
+        };
+        
+        setAnalysisJobs([{
+            job_id: dummyJobId,
+            node_id: 'HASH-1', // Tie to an existing node
+            status: 'COMPLETE',
+            progress: 100,
+            threat_detected: true,
+            max_threat_level: 4,
+            entities: [dummyThreat],
+            replay_url: '/api/clips' // Dummy or we can use existing clip URL logic if needed, actually replay_url is the full path. Let's look up an existing incident or use a dummy image.
+        }]);
+        
+        // Let the polling mechanism naturally pick up this COMPLETE job? No, pollJobs overrides analysisJobs from the server!
+        // To make it sticky, we just directly invoke the threat logic here, since pollJobs will wipe it if the server doesn't know about `SIM-...`.
+        setThreatEntities([dummyThreat]);
+        
+        // Wait, what if we just use an existing clip for the replay?
+        // Let's use the first available activeClip from the backend or a dummy video URL
+        setReplayUrls({
+            'HASH-1': `${API_BASE}/clips/20260608_153957_24.180_94.260_PANGAL_SANGJAI.mp4`
+        });
+        
+        setMode(MODE.THREAT);
+        playBrowserBuzzer(4);
+        
+        setAlerts(prev => [{
+            id: `JOB-${Date.now()}`,
+            level: 'danger',
+            time: new Date().toLocaleTimeString(),
+            txt: `SIMULATED THREAT — 1 entity | L4`,
+            score: 100,
+        }, ...prev.slice(0, 49)]);
+        
+      }, 1500);
+
+    } catch (e) {
+      setMode(MODE.STANDBY);
+    }
+  }, [clearTimer]);
+
+  const dismissThreat = useCallback(() => {
+    setMode(MODE.STANDBY);
+    setAnalysisJobs([]);
+    setThreatEntities([]);
+    setReplayUrls({});
+    
+    // Set a temporary "last seen" to a fake future value to act as a brief cooldown
+    // while we fetch the actual latest ID from the backend. This prevents race conditions
+    // where pollJobs immediately re-triggers the alert before the fetch completes.
+    setLastSeenJobId(`COOLDOWN-${Date.now()}`);
+    
+    fetch(`${API_BASE}/api/analyze/all`)
+      .then(res => res.json())
+      .then(data => {
+         const jobs = data.jobs || [];
+         if (jobs.length > 0) {
+             setLastSeenJobId(jobs[jobs.length - 1].job_id);
+         }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Global SPACEBAR listener
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.code === 'Space' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+        e.preventDefault();
+        if (modeRef.current === MODE.THREAT) {
+          dismissThreat();
+        } else {
+          triggerAnalysis();
+        }
+      } else if (e.code === 'KeyT' && e.target.tagName !== 'INPUT') {
+        // T for Simulate Threat
+        e.preventDefault();
+        simulateThreat();
+      } else if (e.code === 'Escape') {
+        if (modeRef.current === MODE.THREAT) {
+          dismissThreat();
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [triggerAnalysis, dismissThreat]);
+
+  // ── Overlay states ────────────────────────────────────────────
+  const isAnalyzing = mode === MODE.ANALYZING;
+  const isThreat    = mode === MODE.THREAT;
+  const isClear     = mode === MODE.CLEAR;
+
+  const analyzeProgress = analysisJobs.length > 0
+    ? Math.round(analysisJobs.reduce((s, j) => s + (j.progress || 0), 0) / analysisJobs.length)
+    : 0;
+
+  // For sidebar: show threat entities when in THREAT mode, else empty
+  const displayEntities = isThreat ? threatEntities.map(e => ({
+    ...e,
+    id: `ENT-${String(e.id || 0)}`,
+    score: e.threat_score || e.threat_level * 25,
+    status: e.behavior || 'DETECTED',
+    type: e.threat_level >= 4 ? 'high' : e.threat_level >= 2 ? 'mid' : 'low',
+    distance: e.distance_m || 0,
+    weapon: e.class === 'Weapon',
+    camera: e.camera,
+  })) : [];
+
+  return (
+    <div className="h-screen w-screen bg-[#020617] text-[#94A3B8] font-sans overflow-hidden flex flex-col select-none">
+
+      {/* THREAT ALARM OVERLAY MOVED TO MAP CONTAINER */}
+
+
+      {/* SECTOR CLEAR OVERLAY REMOVED AS REQUESTED */}
+
+      {/* ── THREAT CONFIRMED BANNER ── */}
+      {isThreat && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[180] pointer-events-auto">
+          <div className="bg-[#FF3B3B]/10 border border-[#FF3B3B] rounded-xl px-8 py-4 flex items-center gap-6 shadow-2xl shadow-[#FF3B3B]/20 backdrop-blur-md">
+            <div className="w-3 h-3 rounded-full bg-[#FF3B3B] animate-ping" />
+            <div>
+              <div className="text-[#FF3B3B] font-bold text-lg tracking-widest uppercase">
+                ⚠ THREAT CONFIRMED — {threatEntities.length} ENTITIES
+              </div>
+              <div className="text-red-300/70 text-xs mt-0.5">
+                Clip saved. Press ESC to dismiss.
+              </div>
+            </div>
+            <button
+              onClick={dismissThreat}
+              className="ml-4 text-slate-400 hover:text-white text-xl"
+            >✕</button>
+          </div>
+        </div>
+      )}
+
+
+
+
+
+      {/* ── HEADER ── */}
+      <Header
+        entities={displayEntities}
+        time={time}
+        isRecording={isThreat}
+        mode={mode}
+        analyzeProgress={analyzeProgress}
+        sidebarOpen={false}
+        setSidebarOpen={() => {}}
+        system={system}
+      />
+
+      <main className="grow flex overflow-hidden relative">
+        <section className="grow flex flex-col min-w-0 bg-[#030B17] relative">
+          <div className="grow overflow-hidden bg-[#020617] relative">
+            {/* ── THREAT ALARM OVERLAY ── */}
+            {isThreat && (
+              <div className="absolute inset-0 z-[200] pointer-events-none">
+                <div className="absolute inset-0 border-4 border-[#FF3B3B] animate-pulse rounded-none shadow-[inset_0_0_50px_rgba(255,59,59,0.2)]" />
+                <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-transparent via-[#FF3B3B] to-transparent animate-pulse" />
+                <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-transparent via-[#FF3B3B] to-transparent animate-pulse" />
+              </div>
+            )}
+            <TacticalMap
+              nodes={nodes}
+              entities={displayEntities}
+              mode={mode}
+              replayUrls={replayUrls}
+              onDismiss={dismissThreat}
+            />
+          </div>
+          <Footer entities={displayEntities} uptime={uptime} alerts={alerts} incidents={incidents} formatUptime={formatUptime} />
+        </section>
+
+        <Sidebar
+          entities={displayEntities}
+          alerts={alerts}
+          incidents={incidents}
+          beacons={beacons}
+          system={system}
+          nodes={nodes}
+          setNodes={setNodes}
+          setHighlight={() => {}}
+          sidebarOpen={isThreat}   /* Auto-open when threat */
+          setSidebarOpen={() => {}}
+        />
+      </main>
+    </div>
+  );
+}

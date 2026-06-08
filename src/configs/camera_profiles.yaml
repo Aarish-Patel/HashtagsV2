@@ -1,0 +1,55 @@
+# OV5647 Camera Simulation Profiles
+# Derived from ESP_P4_Streaming Code ISP calibration data
+# Source: camera_pipeline.c s_profiles[] and http_server.c settings
+
+ov5647:
+  # Native capture resolution (from uvc_frame_config.h)
+  capture_width: 800
+  capture_height: 640
+
+  # HTTP streaming settings (from http_server.c)
+  stream_fps: 5
+  jpeg_quality: 45       # INCREASED from 15 temporarily so baseline YOLO can detect you
+
+  # Clip duration (from app_main.c STREAM_DURATION_MS)
+  clip_duration_sec: 30
+
+  # Lens distortion (from unified_backend.py K_MATRIX / D_COEFFS)
+  # OV5647 has mild barrel distortion
+  focal_length: 500.0
+  cx: 400.0              # Principal point X (half of 800)
+  cy: 320.0              # Principal point Y (half of 640)
+  distortion_coeffs: [-0.04, 0.02, 0.0, 0.0, 0.0]
+
+  # Color cast profile — the OV5647 with Daylight ISP profile
+  # produces a strong magenta/pink tint (observed in personOV.jpeg)
+  # This is caused by the CCM overshooting red and undershooting green
+  # ISP Daylight CCM from camera_pipeline.c:
+  #   R: [1.997, -0.640, -0.358]
+  #   G: [-0.406, 1.944, -0.538]
+  #   B: [-0.019, -0.740, 1.759]
+  color_cast:
+    r_gain: 1.10          # REDUCED from 1.25 temporarily
+    g_gain: 0.90          # INCREASED from 0.82 temporarily
+    b_gain: 0.95          # Slight blue suppression
+    saturation_scale: 0.90 # Overall desaturation from ISP processing
+
+  # Sensor noise characteristics
+  noise:
+    gaussian_sigma_day: 1.5   # REDUCED from 5 to stop massive false-positive motion
+    gaussian_sigma_night: 10
+    salt_pepper_prob: 0.0001
+
+  # IR LED illumination (from app_main.c GPIO_NUM_22)
+  ir_led:
+    enabled: true
+    falloff_center_x: 0.5   # Illumination centered on frame
+    falloff_center_y: 0.5
+    falloff_radius: 0.7     # 70% of frame radius at full brightness
+    edge_brightness: 0.4    # 40% brightness at edges
+
+webcam_simulation:
+  # Keyboard triggers simulating RADAR wakeup
+  trigger_key_space: true   # Spacebar = motion detected
+  trigger_key_enter: true   # Enter = motion detected
+  show_raw_feed: false      # Show original webcam alongside degraded
