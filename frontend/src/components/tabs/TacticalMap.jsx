@@ -44,6 +44,9 @@ const createTacticalIcon = (isThreat) => {
   });
 };
 
+const STANDBY_ICON = createTacticalIcon(false);
+const THREAT_ICON = createTacticalIcon(true);
+
 const TacticalMap = ({
   nodes = [],
   entities = [],
@@ -89,7 +92,7 @@ const TacticalMap = ({
             <Marker 
               key={node.id} 
               position={[node.lat, node.lng]} 
-              icon={createTacticalIcon(nodeHasThreat)}
+              icon={nodeHasThreat ? THREAT_ICON : STANDBY_ICON}
             >
               {nodeHasThreat && (
                 <Popup className="tactical-popup" closeButton={false} autoPan={true}>

@@ -96,7 +96,6 @@ const StorageView = ({
                      >
                         {/* SIMULATED THUMBNAIL OVERLAY */}
                         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent z-0" />
-                        <Video size={24} className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white/5 group-hover:text-[#00F5FF]/20 transition-colors" />
 
                         {/* DELETE BUTTON */}
                         <button
