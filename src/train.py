@@ -4,16 +4,16 @@ def main():
     print("Starting Advanced Detection Training Pipeline")
     print("Initializing YOLOv8 model for Occluded/Small Person Detection")
     
-    # Load a model (we use YOLOv8x for maximum capability on small objects)
-    model = YOLO("yolov8x.pt")
+    # Load the checkpoint from the 9.5 hour run to continue training
+    model = YOLO(r"C:\Users\hsiraa\runs\detect\Advanced_Person_Detection\Occlusion_Camouflage_V1-7\weights\last.pt")
     
     # Custom training configuration targeting occlusion and small objects
     # We heavily boost Mosaic, MixUp, and enable specific data augmentation
-    print("Starting training with advanced augmentation...")
+    print("Resuming training with advanced augmentation from checkpoint...")
     results = model.train(
         data="datasets/Combined.yaml",
         epochs=50,        # Max epochs if time limit isn't hit first
-        time=9.5,         # Auto-stop after 9.5 hours to fit the 10 hour window
+        time=8.0,         # Run for exactly 8 more hours
         imgsz=640,        # Reduced from 800 to prevent OOM/memory issues
         batch=8,          # Increased batch size since imgsz is smaller
         device="0",       # Use GPU

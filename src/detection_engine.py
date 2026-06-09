@@ -46,8 +46,6 @@ from dataclasses import dataclass, field
 
 # YOLO models loaded lazily
 _yolo_person_model = None
-_yolo_pose_model = None
-
 
 import threading
 _model_lock = threading.Lock()
@@ -62,18 +60,6 @@ def _get_person_model(model_path: str = None, device: str = "cuda:0"):
             _yolo_person_model = YOLO(path)
             _yolo_person_model.to(device)
     return _yolo_person_model
-
-
-def _get_pose_model(model_path: str = None, device: str = "cuda:0"):
-    global _yolo_pose_model
-    with _model_lock:
-        if _yolo_pose_model is None:
-            from ultralytics import YOLO
-            path = model_path or "yolov8x-pose.pt"
-            print(f"Loading YOLOv8 pose model from {path} on device={device}...")
-            _yolo_pose_model = YOLO(path)
-            _yolo_pose_model.to(device)
-    return _yolo_pose_model
 
 
 
@@ -179,11 +165,7 @@ def hierarchical_nms(detections: List[Detection],
     return keep
 
 
-def count_valid_keypoints(keypoints: np.ndarray, min_conf: float = 0.30) -> int:
-    """Count how many of the 17 YOLO pose keypoints are high-confidence."""
-    if keypoints is None or len(keypoints) < 17:
-        return 0
-    return sum(1 for kp in keypoints if kp[2] >= min_conf)
+
 
 
 # ================================================================
@@ -372,25 +354,20 @@ class DetectionEngine:
     def __init__(
         self,
         person_model_path: str = "yolov8x.pt",
-        pose_model_path: str = "yolov8x-pose.pt",
         device: Optional[str] = None,
         person_conf: float = 0.35,    # Raised from 0.15 — critical for zero false positives
-        pose_conf: float = 0.25,
         weapon_conf: float = 0.40,
         img_size: int = 640,          # Standard YOLOv8 resolution (800 fails on close-ups)
     ):
         import torch
         self.device = device if device else ("cuda:0" if torch.cuda.is_available() else "cpu")
         self.person_conf = person_conf
-        self.pose_conf = pose_conf
         self.weapon_conf = weapon_conf
         self.person_model_path = person_model_path
-        self.pose_model_path = pose_model_path
         self.img_size = img_size
 
         # Models loaded lazily on first call
         self._person_model = None
-        self._pose_model = None
         self._inference_lock = threading.Lock()
 
         print(f"[ENGINE] DetectionEngine v3 initialized. Device={self.device}, "
@@ -399,8 +376,6 @@ class DetectionEngine:
     def _ensure_models(self):
         if self._person_model is None:
             self._person_model = _get_person_model(self.person_model_path, self.device)
-        if self._pose_model is None:
-            self._pose_model = _get_pose_model(self.pose_model_path, self.device)
 
         if not hasattr(self, 'last_boxes'):
             self.last_boxes = {}
@@ -422,16 +397,13 @@ class DetectionEngine:
             if active_boxes is None:
                 active_boxes = self.last_boxes.get(cam_id, [])
                 
-            candidate_boxes = self._detect_persons(frame, active_boxes, motion_mask)
-            if not candidate_boxes:
+            verified = self._detect_persons(frame, active_boxes, motion_mask)
+            if not verified:
                 # If no persons, we don't care about weapons (filters out false positive weapons in empty scenes)
                 self.last_boxes[cam_id] = []
                 return []
 
-            # === STAGE 2: Pose Verification on each candidate ===
-            verified = self._verify_with_pose(frame, candidate_boxes)
-
-            # === STAGE 3: Weapon Detection ===
+            # === STAGE 2: Weapon Detection ===
             weapon_dets = self._detect_weapons(frame)
             
             # Filter false positive weapons: must overlap with a verified person
@@ -446,7 +418,7 @@ class DetectionEngine:
                             
             verified.extend(valid_weapons)
 
-            # === STAGE 4: Hierarchical NMS — 1 box per entity ===
+            # === STAGE 3: Hierarchical NMS — 1 box per entity ===
             final = hierarchical_nms(verified, iou_thresh=0.25, containment_thresh=0.40)
             
             self.last_boxes[cam_id] = [d.bbox for d in final]
@@ -454,21 +426,22 @@ class DetectionEngine:
             return final
 
     def _detect_persons(self, frame: np.ndarray, active_boxes: List[Tuple] = None,
-                        motion_mask: np.ndarray = None) -> List[Dict]:
+                        motion_mask: np.ndarray = None) -> List[Detection]:
         """
         Stage 1: YOLOv8x full-frame person detection.
-        Returns raw candidate boxes (not yet verified).
+        Returns verified Detection objects (pure YOLO).
         """
         results = self._person_model(
             frame,
             classes=[0],           # Only person class
-            conf=0.05,             # Ultra low threshold for motion/tracked regions
+            conf=self.person_conf, # Robust threshold to naturally filter mini false positives
             device=self.device,
             verbose=False,
-            imgsz=self.img_size
+            imgsz=self.img_size,
+            half=(self.device != "cpu")
         )
 
-        candidates = []
+        verified = []
         for b in results[0].boxes.data.cpu().numpy():
             x1, y1, x2, y2, conf = b[:5]
             bbox = (int(x1), int(y1), int(x2-x1), int(y2-y1))
@@ -486,138 +459,18 @@ class DetectionEngine:
                 if mask_roi.size > 0 and cv2.countNonZero(mask_roi) > (mask_roi.size * 0.01):
                     has_motion = True
             
-            # Unconditionally pass all boxes > 0.05 to Pose Verification. Pose will filter false positives.
-            if conf >= 0.05:
-                candidates.append({
-                    "bbox": bbox,
-                    "confidence": float(conf),
-                    "cx": int((x1+x2)/2),
-                    "cy": int((y1+y2)/2),
-                    "is_tracked": is_tracked,
-                    "has_motion": has_motion
-                })
-
-        return candidates
-
-    def _verify_with_pose(self, frame: np.ndarray,
-                          candidates: List[Dict]) -> List[Detection]:
-        """
-        Stage 2: Pose skeleton verification.
-
-        For each YOLO candidate, run pose estimation on the full frame
-        (more accurate than cropped — YOLO pose is fast enough).
-        Match pose results back to each candidate box.
-
-        Acceptance criteria:
-          - conf >= 0.50 AND keypoints >= 0: Always accept (high confidence person)
-          - conf >= 0.35 AND keypoints >= 5: Accept (verified skeleton)
-          - conf >= 0.35 AND keypoints 2-4: Accept as partial (occluded person)
-          - conf  < 0.50 AND keypoints < 2: REJECT (likely not a person)
-        """
-        # Run pose on full frame once — more efficient than per-crop
-        pose_results = self._pose_model(
-            frame,
-            conf=self.pose_conf,
-            device=self.device,
-            verbose=False,
-            imgsz=self.img_size
-        )
-
-        # Build a list of (bbox, keypoints) from pose model
-        pose_detections = []
-        if pose_results[0].keypoints is not None:
-            for i, b in enumerate(pose_results[0].boxes.data.cpu().numpy()):
-                x1, y1, x2, y2, conf = b[:5]
-                kps = pose_results[0].keypoints.data.cpu().numpy()[i] \
-                      if i < len(pose_results[0].keypoints.data) else None
-                pose_detections.append({
-                    "bbox": (int(x1), int(y1), int(x2-x1), int(y2-y1)),
-                    "keypoints": kps,
-                    "n_valid_kp": count_valid_keypoints(kps)
-                })
-
-        verified = []
-        used_pose_indices = set()
-
-        for cand in candidates:
-            # Find the best matching pose detection for this YOLO candidate
-            best_pose = None
-            best_iou = 0.30
-            best_pose_idx = -1
-
-            for pi, pd in enumerate(pose_detections):
-                if pi in used_pose_indices:
-                    continue
-                iou = compute_iou(cand["bbox"], pd["bbox"])
-                if iou > best_iou:
-                    best_iou = iou
-                    best_pose = pd
-                    best_pose_idx = pi
-
-            # Determine acceptance
-            conf = cand["confidence"]
-            n_kp = best_pose["n_valid_kp"] if best_pose else 0
-            keypoints = best_pose["keypoints"] if best_pose else None
-            is_tracked = cand.get("is_tracked", False)
-            has_motion = cand.get("has_motion", False)
-
-            if best_pose_idx >= 0:
-                used_pose_indices.add(best_pose_idx)
-
-            # Acceptance logic
-            if is_tracked and conf >= 0.05:
-                # Keep tracking with an absurdly low threshold
-                source = "yolo_tracked"
-                accept = True
-            elif conf >= 0.50:
-                # High confidence YOLO detection -> auto accept
-                source = "yolo_high_conf"
-                accept = True
-            elif n_kp >= 5:
-                # Full skeleton confirmed
-                source = "pose_verified"
-                accept = True
-            elif conf >= 0.15 and n_kp >= 2:
-                # Partial skeleton (e.g. upper body) + decent YOLO confidence
-                source = "pose_partial"
-                accept = True
-            elif has_motion and conf >= 0.35:
-                # Motion + medium YOLO confidence
-                source = "yolo_motion"
-                accept = True
-            else:
-                # Ignore noise, bottles, etc.
-                accept = False
-                source = "rejected"
-
-            if accept:
-                x, y, bw, bh = cand["bbox"]
-                det = Detection(
-                    x=x, y=y, w=bw, h=bh,
-                    confidence=conf,
-                    class_name="Person",
-                    source=source,
-                    keypoints=keypoints,
-                    metadata={"n_keypoints": n_kp, "pose_iou": round(best_iou, 2)}
-                )
-                verified.append(det)
-
-        # Also add any pose detections that didn't match a YOLO box
-        # (catches cases where pose finds someone YOLO missed)
-        for pi, pd in enumerate(pose_detections):
-            if pi in used_pose_indices:
-                continue
-            n_kp = pd["n_valid_kp"]
-            if n_kp >= 7:  # Strong skeleton with no YOLO match = occluded person
-                x, y, bw, bh = pd["bbox"]
-                verified.append(Detection(
-                    x=x, y=y, w=bw, h=bh,
-                    confidence=0.40,
-                    class_name="Person",
-                    source="pose_only",
-                    keypoints=pd["keypoints"],
-                    metadata={"n_keypoints": n_kp, "pose_iou": 0.0}
-                ))
+            source = "yolo_verified"
+            if is_tracked: source = "yolo_tracked"
+            elif has_motion: source = "yolo_motion"
+                
+            verified.append(Detection(
+                x=bbox[0], y=bbox[1], w=bbox[2], h=bbox[3],
+                confidence=float(conf),
+                class_name="Person",
+                source=source,
+                keypoints=None,
+                metadata={}
+            ))
 
         return verified
 
@@ -633,7 +486,8 @@ class DetectionEngine:
                 conf=self.weapon_conf,
                 device=self.device,
                 verbose=False,
-                imgsz=self.img_size
+                imgsz=self.img_size,
+                half=(self.device != "cpu")
             )
             dets = []
             for b in results[0].boxes.data.cpu().numpy():

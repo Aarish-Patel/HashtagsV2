@@ -9,3 +9,6 @@ src/clips/
 src/forensic_journal.json
 Archive/
 temp_*.mp4
+kaggle/datasets/
+kaggle/hashtag-initial-weights/
+kaggle/*.zip

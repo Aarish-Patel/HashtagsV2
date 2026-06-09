@@ -326,6 +326,20 @@ def remove_node(node_id):
     return jsonify({"status": "ok"})
 
 
+@app.route("/api/admin/simulate_threat/<node_id>", methods=["POST"])
+def admin_simulate_threat(node_id):
+    sys_obj = get_system()
+    sys_obj.simulate_threat(node_id)
+    return jsonify({"status": "ok", "message": f"Threat simulated on {node_id}"})
+
+
+@app.route("/api/admin/set_background/<node_id>", methods=["POST"])
+def admin_set_background(node_id):
+    sys_obj = get_system()
+    sys_obj.set_permanent_background(node_id)
+    return jsonify({"status": "ok", "message": f"Permanent background set for {node_id}"})
+
+
 # ───────────────────────────────────────────────────────────
 # STARTUP
 # ───────────────────────────────────────────────────────────

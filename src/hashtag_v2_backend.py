@@ -280,6 +280,18 @@ class BatchAnalyzer:
             ret, frame = cap.read()
             if not ret:
                 break
+                
+            # Skip every alternate frame to double analysis speed (process at 2.5 FPS)
+            if fi % 2 != 0:
+                if annotated_out:
+                    # Duplicate the last frame to keep output video smooth
+                    annotated_out.append(annotated_out[-1])
+                    with job._lock:
+                        job.annotated_frames.append(annotated_out[-1])
+                        job.progress = min(100, int((fi + 1) / n * 100))
+                fi += 1
+                continue
+
             if frame.shape[:2] != (TARGET_H, TARGET_W):
                 frame = cv2.resize(frame, (TARGET_W, TARGET_H))
 
@@ -470,8 +482,10 @@ class CameraNode:
         
         self.temp_mp4_path = os.path.join(CLIPS_DIR, f"temp_{self.node_id}.mp4")
         self.temp_writer = None
+        self.permanent_bg_edges = None
         
         self._live_frame: Optional[np.ndarray] = None
+        self._raw_frame: Optional[np.ndarray] = None
         self._latest_detections: List[Detection] = []
         self._lock = threading.Lock()
         self._det_lock = threading.Lock()
@@ -489,7 +503,6 @@ class CameraNode:
         self._inference_thread.start()
         
     def _inference_loop(self):
-        # We NO LONGER pre-train the MOG2 background subtractor
         mog2 = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
         
         while not self._stopped:
@@ -499,9 +512,26 @@ class CameraNode:
                 continue
                 
             try:
-                # Generate live motion mask to boost sensitivity
-                fg_mask = mog2.apply(frame_to_process)
-                _, motion_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
+                motion_mask = None
+                
+                # If permanent bg edges are set, use edge-based structural difference
+                if hasattr(self, 'permanent_bg_edges') and self.permanent_bg_edges is not None:
+                    gray = cv2.cvtColor(frame_to_process, cv2.COLOR_BGR2GRAY)
+                    curr_edges = cv2.Canny(gray, 50, 150)
+                    
+                    # Absolute difference between permanent edges and current edges
+                    edge_diff = cv2.absdiff(curr_edges, self.permanent_bg_edges)
+                    
+                    # Clean up noise
+                    kernel = np.ones((5,5), np.uint8)
+                    edge_diff = cv2.morphologyEx(edge_diff, cv2.MORPH_OPEN, kernel)
+                    edge_diff = cv2.dilate(edge_diff, kernel, iterations=2)
+                    
+                    _, motion_mask = cv2.threshold(edge_diff, 50, 255, cv2.THRESH_BINARY)
+                else:
+                    # Generate live motion mask to boost sensitivity
+                    fg_mask = mog2.apply(frame_to_process)
+                    _, motion_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
 
                 # Run lightweight detection
                 detections = self.engine.detect(frame_to_process, cam_id=self.node_id, fps=TARGET_FPS, motion_mask=motion_mask)
@@ -713,6 +743,7 @@ class CameraNode:
 
                 with self._lock:
                     self._live_frame = annotated
+                    self._raw_frame = frame.copy()
                     
             except Exception as e:
                 print(f"[{self.node_id}] Exception during processing: {e}")
@@ -728,6 +759,12 @@ class CameraNode:
         with self._lock:
             if self._live_frame is not None:
                 return self._live_frame.copy()
+        return None
+
+    def get_raw_frame(self) -> Optional[np.ndarray]:
+        with self._lock:
+            if self._raw_frame is not None:
+                return self._raw_frame.copy()
         return None
 
     def snapshot_buffer(self):
@@ -758,8 +795,7 @@ class HashtagSystem:
     def __init__(self):
         # Shared detection engine (one GPU model for all analysis jobs)
         self.engine = DetectionEngine(
-            person_model_path="yolov8n.pt",
-            pose_model_path="yolov8n-pose.pt",
+            person_model_path=r"C:\Users\hsiraa\runs\detect\Advanced_Person_Detection\Occlusion_Camouflage_V1-7\weights\best.pt",
             person_conf=0.15,
             device=None
         )
@@ -805,6 +841,28 @@ class HashtagSystem:
         if node_id in self.nodes:
             self.nodes[node_id].stop()
             del self.nodes[node_id]
+
+    def set_permanent_background(self, node_id: str):
+        if node_id in self.nodes:
+            node = self.nodes[node_id]
+            frame = node.get_raw_frame()
+            if frame is not None:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                node.permanent_bg_edges = cv2.Canny(gray, 50, 150)
+                print(f"[ADMIN] Set permanent background for {node_id}")
+
+    def simulate_threat(self, node_id: str):
+        if node_id in self.nodes:
+            print(f"[ADMIN] Simulating threat on {node_id}")
+            from detection_engine import Detection
+            fake_det = Detection(x=100, y=100, w=200, h=300, confidence=0.99, class_name="Person", source="simulated", keypoints=None, metadata={})
+            with self.nodes[node_id]._det_lock:
+                self.nodes[node_id]._latest_detections.append(fake_det)
+            if hasattr(self.nodes[node_id], 'temp_mp4_path') and os.path.exists(self.nodes[node_id].temp_mp4_path):
+                import shutil
+                sim_path = self.nodes[node_id].temp_mp4_path.replace(".mp4", "_simulated.mp4")
+                shutil.copy(self.nodes[node_id].temp_mp4_path, sim_path)
+                self.trigger_auto_threat(node_id, sim_path)
 
     def trigger_auto_threat(self, node_id: str, mp4_path: str):
         job_id = f"AUTO-{uuid.uuid4()}"
