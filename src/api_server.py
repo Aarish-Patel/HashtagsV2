@@ -340,6 +340,44 @@ def admin_set_background(node_id):
     return jsonify({"status": "ok", "message": f"Permanent background set for {node_id}"})
 
 
+@app.route("/api/admin/clear_bg/<node_id>", methods=["POST"])
+def admin_clear_background(node_id):
+    sys_obj = get_system()
+    sys_obj.clear_permanent_background(node_id)
+    return jsonify({"status": "ok", "message": f"Permanent background cleared for {node_id}"})
+
+
+@app.route("/api/admin/telemetry", methods=["GET"])
+def admin_telemetry():
+    sys_obj = get_system()
+    return jsonify(sys_obj.get_telemetry())
+
+
+@app.route("/api/admin/node_config/<node_id>", methods=["GET"])
+def admin_get_node_config(node_id):
+    sys_obj = get_system()
+    cfg = sys_obj.get_node_config(node_id)
+    import dataclasses
+    return jsonify(dataclasses.asdict(cfg))
+
+
+@app.route("/api/admin/node_config/<node_id>", methods=["POST"])
+def admin_set_node_config(node_id):
+    data = request.get_json()
+    sys_obj = get_system()
+    cfg = sys_obj.set_node_config(node_id, **data)
+    import dataclasses
+    return jsonify({"status": "ok", "config": dataclasses.asdict(cfg)})
+
+
+@app.route("/api/admin/set_retention/<int:days>", methods=["POST"])
+def admin_set_retention(days):
+    sys_obj = get_system()
+    for nid in sys_obj.nodes.keys():
+        sys_obj.set_node_config(nid, clip_retention_days=days)
+    return jsonify({"status": "ok", "message": f"Clip retention set to {days} days globally"})
+
+
 # ───────────────────────────────────────────────────────────
 # STARTUP
 # ───────────────────────────────────────────────────────────

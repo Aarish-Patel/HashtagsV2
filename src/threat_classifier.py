@@ -252,6 +252,10 @@ class TrackedEntity:
         self.tamper_frames: int = 0
         self.time_in_zone_sec: float = 0.0
 
+        # Approaching object flag — set True when this motion blob is approaching
+        # and should trigger a full batch analysis job on the backend
+        self.triggers_analysis: bool = False
+
         # Posture
         self.current_posture: PostureType = PostureType.UNKNOWN
         self.keypoints: Optional[np.ndarray] = None
@@ -351,18 +355,33 @@ class TrackedEntity:
         self.threat_score = 15
         self.threat_category = "MOTION_CONTACT"
         self.threat_level = ThreatLevel.LOW
+        self.triggers_analysis = False
 
-        # Check if approaching
+        # === APPROACHING OBJECT DETECTION ===
+        # Per user directive: an unidentified object consistently growing in frame area
+        # MUST be escalated to HIGH threat. A human may be hiding behind/under it
+        # and using it as concealment while approaching the perimeter.
+        # Confirmed humans are ALWAYS threats (MEDIUM+) regardless of movement.
         areas = list(self.area_history)
         if len(areas) >= 10:
             early = np.mean(areas[:3])
             late = np.mean(areas[-3:])
-            if early > 100 and late > early * 1.25:
+            growth_ratio = late / max(early, 1)
+
+            if early > 100 and growth_ratio > 1.5:
+                # Significant approach — escalate to HIGH, draw box, trigger analysis
+                self.behavior = "APPROACHING OBJECT — POSSIBLE CONCEALMENT"
+                self.threat_score = 65
+                self.threat_category = "CONCEALED_TARGET"
+                self.threat_level = ThreatLevel.HIGH
+                self.triggers_analysis = True   # Backend will trigger batch analysis
+            elif early > 100 and growth_ratio > 1.25:
+                # Moderate approach — suspicious, escalate to MEDIUM
                 self.behavior = "MOTION APPROACHING"
-                self.threat_score = 30
+                self.threat_score = 35
                 self.threat_category = "SUSPICIOUS_ACTIVITY"
                 self.threat_level = ThreatLevel.MEDIUM
-                
+
         # === BIOMECHANICAL GAIT ANALYSIS (Anti-Camouflage) ===
         # If it looks like a bush but walks like a human, it's a human.
         gait_data = self.gait_analyzer.analyze_kinematics(self.history, self.velocities)
@@ -371,6 +390,7 @@ class TrackedEntity:
             self.threat_score = max(self.threat_score, 75)
             self.threat_category = "CONCEALED_TARGET"
             self.threat_level = ThreatLevel.CRITICAL
+            self.triggers_analysis = True
 
     def _analyze_person(self, fps: float, img_w: int, img_h: int):
         """Full person behavioral analysis with threat scoring."""
@@ -794,5 +814,30 @@ class EntityTracker:
                 "posture": track.current_posture.name if track.current_posture else "UNKNOWN",
                 "time_in_zone": round(track.time_in_zone_sec, 1),
                 "bbox": list(track.bboxes[-1]) if track.bboxes else [0, 0, 0, 0],
+                "triggers_analysis": getattr(track, 'triggers_analysis', False),
             })
         return entities
+
+    def get_analysis_triggers(self) -> List[tuple]:
+        """
+        Returns list of (entity_id, bbox) for any tracked entity that has
+        triggers_analysis=True. Used by CameraNode._inference_loop() to
+        auto-trigger a batch analysis job when an approaching object is detected.
+
+        Per user directive: an approaching unidentified object (concealment threat)
+        triggers the same batch analysis pipeline as a confirmed human detection.
+        """
+        triggers = []
+        for tid, track in self.tracks.items():
+            if (
+                getattr(track, 'triggers_analysis', False)
+                and track.stale_frames < 5
+                and track.confirmed_frames >= 3  # Require at least 3 frames before triggering
+                and track.threat_level >= ThreatLevel.HIGH
+            ):
+                bbox = list(track.bboxes[-1]) if track.bboxes else None
+                if bbox:
+                    triggers.append((tid, bbox))
+                    # Reset flag so we don't trigger repeatedly
+                    track.triggers_analysis = False
+        return triggers

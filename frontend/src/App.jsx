@@ -441,7 +441,7 @@ export default function App() {
             <div className="w-3 h-3 rounded-full bg-[#FF3B3B] animate-ping" />
             <div>
               <div className="text-[#FF3B3B] font-bold text-lg tracking-widest uppercase">
-                ⚠ THREAT CONFIRMED — {threatEntities.length} ENTITIES
+                ⚠ THREAT CONFIRMED
               </div>
               <div className="text-red-300/70 text-xs mt-0.5">
                 Clip saved. Press ESC to dismiss.

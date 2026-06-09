@@ -1,37 +1,28 @@
 """
-detection_engine.py — Military-Grade 2-Stage Detection Pipeline v3
+detection_engine.py — Pure YOLOv8 Detection Pipeline (Production v4)
 
-DESIGN PHILOSOPHY (Final Iteration):
-=====================================
+DESIGN PHILOSOPHY:
+==================
 Previous versions used 5 detection stages (YOLO + SAHI + Pose + MOG2 Motion + Concealment).
-In jungle/border OV5647 imagery, this created a cascade of false positives — every swaying
-leaf, shadow, and JPEG compression artifact was flagged as a "Concealed Target".
+These caused cascading false positives in jungle/border OV5647 imagery.
 
 THIS VERSION uses only 2 detection stages:
-  Stage 1: YOLOv8x Person Detection (conf ≥ 0.35 — high enough to reject non-humans)
-  Stage 2: Pose Skeleton Verification (confirms it is anatomically a human)
+  Stage 1: YOLOv8x Person Detection (conf >= 0.35 default, tunable per-node)
+  Stage 2: YOLO COCO weapons detection (knife/scissors), filtered to overlap with a person.
 
-The result:
-  - ZERO false positives: A leaf/tree/phone will NEVER have 5 skeleton keypoints
-  - Never miss a full human: YOLOv8x at conf 0.35 catches all visible people
-  - One clean box per entity: Hierarchical NMS + containment merging
-  - Body part association: Pose keypoints belong to the owning detection box
+Stage 3: Hierarchical NMS (merge overlapping boxes, absorb contained smaller boxes).
 
-TEMPORAL WINDOW ANALYSIS (The Smart "Suspicious" Gate):
-========================================================
-Instead of flagging any moving region as suspicious, we maintain a 30-second
-rolling analysis window per-camera. A region is only flagged SUSPICIOUS if:
-  1. Its centroid trajectory has a clear directional approach vector
-     (it is consistently moving toward the camera / across the perimeter)
-  2. A human detection was recently associated with that trajectory
-     (the moving region is a PERSON, not a random object)
+NOTE: Pose skeleton verification was explicitly removed by the operator. The custom
+YOLOv8x model (Occlusion_Camouflage_V1) is robust enough without it.
+Size limits are NOT implemented — people can be far away and have small bounding boxes.
 
-Random objects (leaves, waving branches, vehicle reflections) have:
-  - No consistent direction (oscillate back and forth)
-  - No human skeleton association
-Therefore they are NEVER flagged as suspicious.
+PER-NODE TUNING:
+================
+Each camera node has its own YOLO confidence and Canny thresholds (stored in node_configs.json).
+The detect() method accepts an optional person_conf_override to support this without
+changing the global engine state (thread-safe, no lock needed for reads).
 
-Author: HashtagV2 System — Final Military-Grade Iteration
+Author: HashtagV2 System — Production Military-Grade Iteration
 """
 
 import cv2
@@ -382,59 +373,70 @@ class DetectionEngine:
 
     def detect(self, frame: np.ndarray, cam_id: int = 0,
                fps: float = 5.0, active_boxes: List[Tuple] = None,
-               motion_mask: np.ndarray = None) -> List[Detection]:
+               motion_mask: np.ndarray = None,
+               person_conf_override: Optional[float] = None) -> List[Detection]:
         """
         Run the 2-stage detection pipeline on a single frame.
 
-        Returns a deduplicated list of HUMAN-VERIFIED detections only.
-        No motion blobs. No concealment guesses. Only confirmed humans + weapons.
+        Args:
+            frame:                Input BGR frame from camera.
+            cam_id:               Camera identifier (for last_boxes tracking).
+            fps:                  Frame rate (informational).
+            active_boxes:         Previously tracked boxes (for continuity).
+            motion_mask:          Optional MOG2/Canny motion mask.
+            person_conf_override: Per-node confidence threshold override.
+                                  If None, uses self.person_conf (global default).
+                                  This allows per-camera tuning without lock contention.
+
+        Returns:
+            Deduplicated list of confirmed Person + Weapon detections.
         """
         self._ensure_models()
         h, w = frame.shape[:2]
+        conf = person_conf_override if person_conf_override is not None else self.person_conf
 
         with self._inference_lock:
             # === STAGE 1: YOLO Person Detection ===
             if active_boxes is None:
                 active_boxes = self.last_boxes.get(cam_id, [])
-                
-            verified = self._detect_persons(frame, active_boxes, motion_mask)
+
+            verified = self._detect_persons(frame, active_boxes, motion_mask, conf)
             if not verified:
-                # If no persons, we don't care about weapons (filters out false positive weapons in empty scenes)
                 self.last_boxes[cam_id] = []
                 return []
 
             # === STAGE 2: Weapon Detection ===
             weapon_dets = self._detect_weapons(frame)
-            
+
             # Filter false positive weapons: must overlap with a verified person
             valid_weapons = []
             for wd in weapon_dets:
                 for pd in verified:
                     if pd.class_name == "Person":
-                        # Check if weapon bounding box overlaps with person bounding box
                         if compute_iou(wd.bbox, pd.bbox) > 0 or compute_containment(wd.bbox, pd.bbox) > 0 or compute_containment(pd.bbox, wd.bbox) > 0:
                             valid_weapons.append(wd)
                             break
-                            
+
             verified.extend(valid_weapons)
 
             # === STAGE 3: Hierarchical NMS — 1 box per entity ===
             final = hierarchical_nms(verified, iou_thresh=0.25, containment_thresh=0.40)
-            
-            self.last_boxes[cam_id] = [d.bbox for d in final]
 
+            self.last_boxes[cam_id] = [d.bbox for d in final]
             return final
 
     def _detect_persons(self, frame: np.ndarray, active_boxes: List[Tuple] = None,
-                        motion_mask: np.ndarray = None) -> List[Detection]:
+                        motion_mask: np.ndarray = None,
+                        conf_override: Optional[float] = None) -> List[Detection]:
         """
         Stage 1: YOLOv8x full-frame person detection.
-        Returns verified Detection objects (pure YOLO).
+        conf_override allows per-node tuning without changing engine global state.
         """
+        conf = conf_override if conf_override is not None else self.person_conf
         results = self._person_model(
             frame,
-            classes=[0],           # Only person class
-            conf=self.person_conf, # Robust threshold to naturally filter mini false positives
+            classes=[0],
+            conf=conf,
             device=self.device,
             verbose=False,
             imgsz=self.img_size,
@@ -443,29 +445,29 @@ class DetectionEngine:
 
         verified = []
         for b in results[0].boxes.data.cpu().numpy():
-            x1, y1, x2, y2, conf = b[:5]
+            x1, y1, x2, y2, conf_val = b[:5]
             bbox = (int(x1), int(y1), int(x2-x1), int(y2-y1))
-            
+
             is_tracked = False
             if active_boxes:
                 for ab in active_boxes:
                     if compute_iou(bbox, ab) > 0.05 or compute_containment(bbox, ab) > 0.1 or compute_containment(ab, bbox) > 0.1:
                         is_tracked = True
                         break
-                        
+
             has_motion = False
             if motion_mask is not None:
                 mask_roi = motion_mask[int(y1):int(y2), int(x1):int(x2)]
                 if mask_roi.size > 0 and cv2.countNonZero(mask_roi) > (mask_roi.size * 0.01):
                     has_motion = True
-            
+
             source = "yolo_verified"
             if is_tracked: source = "yolo_tracked"
             elif has_motion: source = "yolo_motion"
-                
+
             verified.append(Detection(
                 x=bbox[0], y=bbox[1], w=bbox[2], h=bbox[3],
-                confidence=float(conf),
+                confidence=float(conf_val),
                 class_name="Person",
                 source=source,
                 keypoints=None,

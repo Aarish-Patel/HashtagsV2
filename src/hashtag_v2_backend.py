@@ -59,19 +59,64 @@ from threat_classifier import (
 # ===========================
 # CONSTANTS
 # ===========================
-CLIPS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Clips")
+SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+CLIPS_DIR = os.path.join(SRC_DIR, "Clips")
 os.makedirs(CLIPS_DIR, exist_ok=True)
 
-FORENSIC_JOURNAL_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "forensic_journal.json"
+FORENSIC_JOURNAL_PATH = os.path.join(SRC_DIR, "forensic_journal.json")
+NODE_CONFIGS_PATH = os.path.join(SRC_DIR, "node_configs.json")
+
+# Portable model path: reads from env var HASHTAG_MODEL_PATH, falls back to the
+# known local path. Set the env var for deployment on a different machine.
+DEFAULT_MODEL_PATH = os.environ.get(
+    "HASHTAG_MODEL_PATH",
+    r"C:\Users\hsiraa\runs\detect\Advanced_Person_Detection\Occlusion_Camouflage_V1-7\weights\best.pt"
 )
 
 TARGET_W, TARGET_H = 800, 640
-# We process exactly 60 frames for a 30s buffer, which allows YOLOv8 to run in ~10s on a good GPU
-TARGET_FPS = 2.0            # Reduced from 5.0 to 2.0 to massively speed up 30s batch analysis (60 frames instead of 150)
-BUFFER_SECONDS = 30           # Rolling pre-buffer duration
-MIN_FRAMES_FOR_THREAT = 1     # 1 second of confirmed tracking required (at 1 FPS)
-BUZZER_COOLDOWN_SEC = 10      # Don't re-beep within N seconds
+TARGET_FPS = 2.0
+BUFFER_SECONDS = 30
+MIN_FRAMES_FOR_THREAT = 1
+BUZZER_COOLDOWN_SEC = 10
+
+# Max concurrent GPU batch analysis jobs to prevent OOM on multi-camera wakeup.
+# If 5 cameras wake up simultaneously, 5 GPU jobs would OOM. This cap queues extras.
+_BATCH_SEMAPHORE = threading.Semaphore(2)
+
+
+# ===========================
+# PER-NODE CONFIGURATION
+# ===========================
+from dataclasses import dataclass, asdict
+
+@dataclass
+class NodeConfig:
+    """Per-camera tuning parameters, persisted to node_configs.json."""
+    person_conf: float = 0.35
+    canny_low: int = 50
+    canny_high: int = 150
+    clip_retention_days: int = 7  # Auto-delete clips older than this
+
+
+def _load_node_configs() -> Dict[str, NodeConfig]:
+    """Load per-node configs from disk. Returns defaults if file missing."""
+    if os.path.exists(NODE_CONFIGS_PATH):
+        try:
+            with open(NODE_CONFIGS_PATH) as f:
+                raw = json.load(f)
+            return {nid: NodeConfig(**cfg) for nid, cfg in raw.items()}
+        except Exception as e:
+            print(f"[CONFIG] Failed to load node_configs.json: {e}")
+    return {}
+
+
+def _save_node_configs(configs: Dict[str, "NodeConfig"]):
+    """Persist all node configs to disk."""
+    try:
+        with open(NODE_CONFIGS_PATH, "w") as f:
+            json.dump({nid: asdict(cfg) for nid, cfg in configs.items()}, f, indent=2)
+    except Exception as e:
+        print(f"[CONFIG] Failed to save node_configs.json: {e}")
 
 # ===========================
 # AUDIBLE ALERT (Windows)
@@ -479,22 +524,33 @@ class CameraNode:
         self.online = False
         self._stopped = False
         self.clips_saved = 0
-        
+
         self.temp_mp4_path = os.path.join(CLIPS_DIR, f"temp_{self.node_id}.mp4")
         self.temp_writer = None
         self.permanent_bg_edges = None
-        
+
+        # Lighting-change detection: track mean brightness to auto-invalidate bg
+        self._bg_capture_mean_brightness: Optional[float] = None
+        # Approaching-object auto-analysis cooldown (prevents repeated triggers)
+        self._last_obj_trigger_time: float = 0.0
+        self._OBJ_TRIGGER_COOLDOWN = 30.0  # seconds
+
+        # Per-node entity tracker for approaching-object detection in the inference loop
+        node_num = int(node_id.split('-')[-1]) if '-' in node_id and node_id.split('-')[-1].isdigit() else 1
+        self._node_num = node_num
+        self._rt_tracker = EntityTracker(cam_id=node_num, img_w=TARGET_W, img_h=TARGET_H)
+
         self._live_frame: Optional[np.ndarray] = None
         self._raw_frame: Optional[np.ndarray] = None
         self._latest_detections: List[Detection] = []
         self._lock = threading.Lock()
         self._det_lock = threading.Lock()
-        
+
         self._fps = 0.0
         self._ts_ring = deque(maxlen=30)
-        
+
         self.degrader = OV5647Degrader()
-        
+
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
 
@@ -504,41 +560,88 @@ class CameraNode:
         
     def _inference_loop(self):
         mog2 = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
-        
+
         while not self._stopped:
             frame_to_process = self.get_live_frame()
             if frame_to_process is None:
                 time.sleep(0.1)
                 continue
-                
+
             try:
                 motion_mask = None
-                
+                cfg = self.system.get_node_config(self.node_id)
+
+                # === AUTO BACKGROUND INVALIDATION ===
+                # If lighting changes drastically (day -> night or vice versa),
+                # the permanent background is no longer valid. Auto-reset to MOG2.
+                if self.permanent_bg_edges is not None and self._bg_capture_mean_brightness is not None:
+                    gray_check = cv2.cvtColor(frame_to_process, cv2.COLOR_BGR2GRAY)
+                    current_brightness = float(np.mean(gray_check))
+                    brightness_change_ratio = abs(current_brightness - self._bg_capture_mean_brightness) / max(self._bg_capture_mean_brightness, 1.0)
+                    if brightness_change_ratio > 0.40:  # >40% change in mean brightness
+                        print(f"[{self.node_id}] BACKGROUND_INVALIDATED — Major lighting change detected (ratio={brightness_change_ratio:.2f}). Reverting to MOG2.")
+                        self.permanent_bg_edges = None
+                        self._bg_capture_mean_brightness = None
+                        self.system._log_event(
+                            "BACKGROUND_INVALIDATED",
+                            f"{self.node_id}: Lighting changed {brightness_change_ratio*100:.0f}% — bg reset to MOG2. Recapture recommended.",
+                            threat_level=1
+                        )
+
                 # If permanent bg edges are set, use edge-based structural difference
                 if hasattr(self, 'permanent_bg_edges') and self.permanent_bg_edges is not None:
                     gray = cv2.cvtColor(frame_to_process, cv2.COLOR_BGR2GRAY)
-                    curr_edges = cv2.Canny(gray, 50, 150)
-                    
+                    curr_edges = cv2.Canny(gray, cfg.canny_low, cfg.canny_high)
+
                     # Absolute difference between permanent edges and current edges
                     edge_diff = cv2.absdiff(curr_edges, self.permanent_bg_edges)
-                    
+
                     # Clean up noise
-                    kernel = np.ones((5,5), np.uint8)
+                    kernel = np.ones((5, 5), np.uint8)
                     edge_diff = cv2.morphologyEx(edge_diff, cv2.MORPH_OPEN, kernel)
                     edge_diff = cv2.dilate(edge_diff, kernel, iterations=2)
-                    
+
                     _, motion_mask = cv2.threshold(edge_diff, 50, 255, cv2.THRESH_BINARY)
                 else:
                     # Generate live motion mask to boost sensitivity
                     fg_mask = mog2.apply(frame_to_process)
                     _, motion_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
 
-                # Run lightweight detection
-                detections = self.engine.detect(frame_to_process, cam_id=self.node_id, fps=TARGET_FPS, motion_mask=motion_mask)
-                
+                # Run lightweight detection with per-node confidence override
+                detections = self.engine.detect(
+                    frame_to_process,
+                    cam_id=self.node_id,
+                    fps=TARGET_FPS,
+                    motion_mask=motion_mask,
+                    person_conf_override=cfg.person_conf
+                )
+
                 with self._det_lock:
                     self._latest_detections = detections
-                
+
+                # === APPROACHING OBJECT — AUTO ANALYSIS TRIGGER ===
+                # Update the real-time tracker for this node. If an unidentified
+                # motion blob is consistently approaching (growing in area), it may
+                # be a human hiding behind an object. Trigger batch analysis.
+                self._rt_tracker.update(detections, fps=TARGET_FPS)
+                triggers = self._rt_tracker.get_analysis_triggers()
+                now = time.time()
+                if triggers and (now - self._last_obj_trigger_time > self._OBJ_TRIGGER_COOLDOWN):
+                    if self.temp_writer is not None:
+                        # Flush the current temp file and trigger analysis on it
+                        self.temp_writer.release()
+                        self.temp_writer = None
+                    import shutil
+                    if os.path.exists(self.temp_mp4_path) and os.path.getsize(self.temp_mp4_path) > 1000:
+                        unique_path = self.temp_mp4_path.replace(".mp4", f"_obj_{int(now)}.mp4")
+                        try:
+                            shutil.copy(self.temp_mp4_path, unique_path)
+                            print(f"[{self.node_id}] APPROACHING OBJECT detected — triggering analysis on {unique_path}")
+                            self.system.trigger_auto_threat(self.node_id, unique_path)
+                            self._last_obj_trigger_time = now
+                        except Exception as e:
+                            print(f"[{self.node_id}] Failed to trigger object analysis: {e}")
+
             except Exception as e:
                 print(f"[{self.node_id}] Inference error: {e}")
                 time.sleep(1.0)
@@ -795,12 +898,16 @@ class HashtagSystem:
     def __init__(self):
         # Shared detection engine (one GPU model for all analysis jobs)
         self.engine = DetectionEngine(
-            person_model_path=r"C:\Users\hsiraa\runs\detect\Advanced_Person_Detection\Occlusion_Camouflage_V1-7\weights\best.pt",
-            person_conf=0.15,
+            person_model_path=DEFAULT_MODEL_PATH,
+            person_conf=0.15,  # Baseline; overridden per-node in inference loop
             device=None
         )
         self.analyzer = BatchAnalyzer(self.engine)
         self.degrader = OV5647Degrader()
+
+        # Per-node configuration (loaded from disk)
+        self._node_configs: Dict[str, NodeConfig] = _load_node_configs()
+        self._config_lock = threading.Lock()
 
         # Camera nodes
         self.nodes: Dict[str, CameraNode] = {}
@@ -817,6 +924,9 @@ class HashtagSystem:
         self._events: deque = deque(maxlen=500)
 
         self._setup_nodes()
+
+        # Start clip retention manager daemon
+        threading.Thread(target=self._retention_loop, daemon=True).start()
 
     def _setup_nodes(self):
         defaults = [
@@ -849,7 +959,16 @@ class HashtagSystem:
             if frame is not None:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 node.permanent_bg_edges = cv2.Canny(gray, 50, 150)
-                print(f"[ADMIN] Set permanent background for {node_id}")
+                # Store the brightness at capture time for auto-invalidation check
+                node._bg_capture_mean_brightness = float(np.mean(gray))
+                print(f"[ADMIN] Set permanent background for {node_id} (brightness={node._bg_capture_mean_brightness:.1f})")
+
+    def clear_permanent_background(self, node_id: str):
+        """Reset a node's permanent background, reverting to MOG2 motion detection."""
+        if node_id in self.nodes:
+            self.nodes[node_id].permanent_bg_edges = None
+            self.nodes[node_id]._bg_capture_mean_brightness = None
+            print(f"[ADMIN] Cleared permanent background for {node_id}")
 
     def simulate_threat(self, node_id: str):
         if node_id in self.nodes:
@@ -946,36 +1065,39 @@ class HashtagSystem:
         return job_ids
 
     def _run_job(self, job: AnalysisJob):
-        """Run analysis job and handle post-analysis actions."""
-        try:
-            self.analyzer.analyze(job)
+        """Run analysis job with GPU concurrency limit to prevent OOM crashes."""
+        # Acquire semaphore — max 2 concurrent GPU jobs.
+        # If 2 are already running, this blocks until one finishes.
+        with _BATCH_SEMAPHORE:
+            try:
+                self.analyzer.analyze(job)
 
-            if job.threat_detected:
-                # Increment node clip count
-                if job.node_id in self.nodes:
-                    self.nodes[job.node_id].clips_saved += 1
+                if job.threat_detected:
+                    # Increment node clip count
+                    if job.node_id in self.nodes:
+                        self.nodes[job.node_id].clips_saved += 1
 
-                # Play buzzer
-                now = time.time()
-                if now - self._last_buzzer > BUZZER_COOLDOWN_SEC:
-                    self._last_buzzer = now
-                    _play_buzzer(job.max_threat_level)
+                    # Play buzzer
+                    now = time.time()
+                    if now - self._last_buzzer > BUZZER_COOLDOWN_SEC:
+                        self._last_buzzer = now
+                        _play_buzzer(job.max_threat_level)
 
-                self._log_event(
-                    "THREAT_CONFIRMED",
-                    f"{job.node_id}: {len(job.entities)} entities | "
-                    f"Threat L{job.max_threat_level}",
-                    threat_level=job.max_threat_level
-                )
-            else:
-                self._log_event("SECTOR_CLEAR", f"{job.node_id}: No threats detected")
+                    self._log_event(
+                        "THREAT_CONFIRMED",
+                        f"{job.node_id}: {len(job.entities)} entities | "
+                        f"Threat L{job.max_threat_level}",
+                        threat_level=job.max_threat_level
+                    )
+                else:
+                    self._log_event("SECTOR_CLEAR", f"{job.node_id}: No threats detected")
 
-        except Exception as e:
-            print(f"[ANALYZE] ERROR in job {job.job_id[:8]}: {e}")
-            import traceback; traceback.print_exc()
-            with job._lock:
-                job.status = AnalysisJob.STATUS_CLEAR
-                job.completed_at = time.time()
+            except Exception as e:
+                print(f"[ANALYZE] ERROR in job {job.job_id[:8]}: {e}")
+                import traceback; traceback.print_exc()
+                with job._lock:
+                    job.status = AnalysisJob.STATUS_CLEAR
+                    job.completed_at = time.time()
 
     def get_job(self, job_id: str) -> Optional[AnalysisJob]:
         with self._job_lock:
@@ -1003,16 +1125,99 @@ class HashtagSystem:
             "sensors": [
                 {
                     "id": nid,
+                    "name": self.nodes[nid].name,
                     "online": ns["online"],
                     "fps": ns["fps"],
                     "buffer_frames": ns["buffer_frames"],
                     "clips_saved": ns["clips_saved"],
-                    "threat_level": 0,   # No real-time threat in standby
+                    "threat_level": 0,
                     "url": f"http://localhost:5000/video_feed/{nid}",
                 }
                 for nid, ns in node_statuses.items()
             ],
         }
+
+    def get_node_config(self, node_id: str) -> NodeConfig:
+        """Return per-node tuning config, creating a default if not set."""
+        with self._config_lock:
+            if node_id not in self._node_configs:
+                self._node_configs[node_id] = NodeConfig()
+            return self._node_configs[node_id]
+
+    def set_node_config(self, node_id: str, **kwargs) -> NodeConfig:
+        """Update a node's tuning config and persist to disk immediately."""
+        with self._config_lock:
+            if node_id not in self._node_configs:
+                self._node_configs[node_id] = NodeConfig()
+            cfg = self._node_configs[node_id]
+            for key, val in kwargs.items():
+                if hasattr(cfg, key):
+                    setattr(cfg, key, type(getattr(cfg, key))(val))
+            _save_node_configs(self._node_configs)
+            print(f"[CONFIG] Node {node_id} tuning updated: {kwargs}")
+            return cfg
+
+    def get_telemetry(self) -> Dict:
+        """Return real-time system health metrics for the Admin Dashboard."""
+        import psutil
+        cpu = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage(CLIPS_DIR)
+        gpu_used_mb = 0
+        gpu_total_mb = 0
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_used_mb = round(torch.cuda.memory_allocated() / 1024 / 1024, 1)
+                gpu_total_mb = round(torch.cuda.get_device_properties(0).total_memory / 1024 / 1024, 1)
+        except Exception:
+            pass
+
+        node_latencies = {}
+        for nid, node in self.nodes.items():
+            node_latencies[nid] = {
+                "online": node.online,
+                "fps": round(node._fps, 1),
+                "has_permanent_bg": node.permanent_bg_edges is not None,
+            }
+
+        return {
+            "cpu_pct": cpu,
+            "ram_pct": mem.percent,
+            "ram_used_gb": round(mem.used / 1024**3, 2),
+            "ram_total_gb": round(mem.total / 1024**3, 2),
+            "disk_used_gb": round(disk.used / 1024**3, 2),
+            "disk_free_gb": round(disk.free / 1024**3, 2),
+            "gpu_used_mb": gpu_used_mb,
+            "gpu_total_mb": gpu_total_mb,
+            "uptime_sec": round(time.time() - self._start_time),
+            "batch_jobs_queued": max(0, 2 - _BATCH_SEMAPHORE._value),
+            "nodes": node_latencies,
+        }
+
+    def _retention_loop(self):
+        """Daemon thread: auto-delete clips older than per-node retention policy."""
+        while True:
+            time.sleep(1800)  # Check every 30 minutes
+            try:
+                # Use maximum retention across all nodes as the global default
+                with self._config_lock:
+                    max_days = max((cfg.clip_retention_days for cfg in self._node_configs.values()), default=7)
+                cutoff = time.time() - max_days * 86400
+                deleted = 0
+                for fname in os.listdir(CLIPS_DIR):
+                    fpath = os.path.join(CLIPS_DIR, fname)
+                    if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
+                        try:
+                            os.remove(fpath)
+                            deleted += 1
+                        except Exception:
+                            pass
+                if deleted > 0:
+                    print(f"[RETENTION] Deleted {deleted} clips older than {max_days} days.")
+                    self._log_event("RETENTION_CLEANUP", f"Auto-deleted {deleted} clips older than {max_days} days.")
+            except Exception as e:
+                print(f"[RETENTION] Error during cleanup: {e}")
 
     def get_events(self, limit: int = 100) -> List[Dict]:
         return list(self._events)[-limit:]

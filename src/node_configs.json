@@ -1,0 +1,14 @@
+{
+  "HASH-1": {
+    "person_conf": 0.35,
+    "canny_low": 50,
+    "canny_high": 150,
+    "clip_retention_days": 7
+  },
+  "HASH-2": {
+    "person_conf": 0.35,
+    "canny_low": 50,
+    "canny_high": 150,
+    "clip_retention_days": 7
+  }
+}
