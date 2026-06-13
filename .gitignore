@@ -11,4 +11,9 @@ Archive/
 temp_*.mp4
 kaggle/datasets/
 kaggle/hashtag-initial-weights/
-kaggle/*.zip
+kaggle/*.zip*.onnx
+*.engine
+
+build/
+managed_components/
+dependencies.lock
