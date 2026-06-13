@@ -1,0 +1,205 @@
+# This is a reusable workflow which builds and runs target tests:
+#
+#   - device
+#     - esp_tinyusb test apps -> runner tag: usb_device
+#   - host
+#     - class drivers test apps -> runner tag: usb_host
+#     - class driver examples -> only build
+
+name: Build and Run USB Test Application
+
+on:
+  workflow_call:
+    inputs:
+      idf_releases:
+        description: 'The JSON array of idf releases to build and run'
+        required: true
+        type: string
+      idf_targets:
+        description: 'The JSON array of targets for target runners'
+        required: true
+        type: string
+      changed_files:
+        description: 'Changed files separated by semicolon'
+        required: false
+        type: string
+
+jobs:
+  build:
+    name: Build USB apps
+    strategy:
+      fail-fast: true
+      matrix:
+        idf_ver: ${{ fromJson(inputs.idf_releases) }}
+        test_app: ["device", "host_native", "host_managed"]
+        include:
+          # Add build paths
+          - test_app: device
+            path: device/esp_tinyusb
+            usb_comp_managed: "no"  # For the completeness
+          - test_app: host_native
+            path: host
+            usb_comp_managed: "no"
+          - test_app: host_managed
+            path: host
+            usb_comp_managed: "yes"
+        exclude:
+          # Exclude using managed usb component for older releases, only with service releases
+          - test_app: host_managed
+            idf_ver: "release-v5.2"
+          - test_app: host_managed
+            idf_ver: "release-v5.3"
+          # Exclude native usb component for IDF >= 6 (usb component has been removed from esp-idf)
+          - test_app: host_native
+            idf_ver: "release-v6.0"
+          - test_app: host_native
+            idf_ver: "latest"
+
+    runs-on: ubuntu-latest
+    container: espressif/idf:${{ matrix.idf_ver }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: 'true'
+      - name: Build USB Test Application
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          git config --global safe.directory $(pwd)
+          pip install idf-build-apps==3.0.1 --upgrade
+          export PEDANTIC_FLAGS="-DIDF_CI_BUILD -Werror -Werror=deprecated-declarations -Werror=unused-variable -Werror=unused-but-set-variable -Werror=unused-function"
+          export EXTRA_CFLAGS="${PEDANTIC_FLAGS} -Wstrict-prototypes"
+          export EXTRA_CXXFLAGS="${PEDANTIC_FLAGS}"
+          export ENV_VAR_USB_COMP_MANAGED=${{ matrix.usb_comp_managed }}
+
+          MODIFIED_FILES_FLAG=""
+          CHANGED_FILES="${{ inputs.changed_files }}"
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "CHANGED_FILES: $CHANGED_FILES"
+            MODIFIED_FILES_FLAG="--modified-files=$CHANGED_FILES"
+          fi
+
+          idf-build-apps find --paths ${{ matrix.path }} --disable-targets linux $MODIFIED_FILES_FLAG
+          idf-build-apps build --paths ${{ matrix.path }} --disable-targets linux $MODIFIED_FILES_FLAG --collect-app-info="app_info_${{ github.run_id }}.txt"
+      - name: Check if build artifacts exist
+        id: check_build_artifacts
+        shell: bash
+        run: |
+          if find . -path "*/build_esp*/*" -type f -print -quit | grep -q .; then
+            echo "build_artifacts_exist=true" >> $GITHUB_OUTPUT
+          else
+            echo "build_artifacts_exist=false" >> $GITHUB_OUTPUT
+          fi
+      - uses: actions/upload-artifact@v6
+        if: steps.check_build_artifacts.outputs.build_artifacts_exist == 'true'
+        with:
+          name: usb_${{ matrix.test_app }}_test_app_bin_${{ matrix.idf_ver }}
+          if-no-files-found: error
+          path: |
+            **/build_esp*/bootloader/bootloader.bin
+            **/build_esp*/partition_table/partition-table.bin
+            **/build_esp*/test_app_*.bin
+            **/build_esp*/test_app_*.elf
+            **/build_esp*/flasher_args.json
+            **/build_esp*/config/sdkconfig.json
+            app_info*.txt
+
+# TODO ideas for target running:
+# - Run all versions (5.2-latest) in one job. So there will be only three jobs per target (device, host_native, host_managed). This could reduce runner time.
+  run:
+    name: Run TestApps on target (${{ matrix.idf_ver }}, ${{ matrix.idf_target }}, ${{ matrix.test_app }}, ${{ matrix.runner_tag }}, ${{ matrix.eco_ver }})
+    if: ${{ github.repository_owner == 'espressif' }}
+    needs: build
+    strategy:
+      fail-fast: true
+      matrix:
+        idf_ver: ${{ fromJson(inputs.idf_releases) }}
+        idf_target: ${{ fromJson(inputs.idf_targets) }}
+        test_app: ["device", "host_native", "host_managed"]
+        runner_tag: ["usb_device", "usb_host", "usb_host_flash_disk"]
+        eco_ver: ["eco_default", "eco4"]
+
+        exclude:
+          # Exclude runner_tag <-> test_app combinations
+          - test_app: device
+            runner_tag: usb_host
+          - test_app: device
+            runner_tag: usb_host_flash_disk
+          - test_app: host_native
+            runner_tag: usb_device
+          - test_app: host_native
+            runner_tag: usb_host_flash_disk
+          - test_app: host_managed
+            runner_tag: usb_device
+          # Exclude esp32p4 for releases before IDF 5.3 for all runner tags (esp32p4 support starts in IDF 5.3)
+          - idf_ver: "release-v5.2"
+            idf_target: "esp32p4"
+          # Exclude using managed usb component for older releases, only with service releases
+          - test_app: host_managed
+            idf_ver: "release-v5.2"
+          - test_app: host_managed
+            idf_ver: "release-v5.3"
+          # Exclude native usb component for IDF >= 6 (usb component has been removed from esp-idf)
+          - test_app: host_native
+            idf_ver: "release-v6.0"
+          - test_app: host_native
+            idf_ver: "latest"
+          # Exclude eco4 version for esp32s2
+          - idf_target: "esp32s2"
+            eco_ver: "eco4"
+          # esp32p4 ECO6 support starts in IDF 5.5
+          - idf_target: "esp32p4"
+            eco_ver: "eco_default"
+            idf_ver: "release-v5.4"
+          - idf_target: "esp32p4"
+            eco_ver: "eco_default"
+            idf_ver: "release-v5.3"
+
+
+    runs-on: [self-hosted, linux, docker, "${{ matrix.idf_target }}", "${{ matrix.runner_tag }}", "${{ matrix.eco_ver }}"]
+    container:
+      image: python:3.11-bookworm
+      options: --privileged --device-cgroup-rule="c 188:* rmw" --device-cgroup-rule="c 166:* rmw"
+      volumes:
+        - /dev/bus/usb:/dev/bus/usb
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        continue-on-error: true
+        id: download_artifact
+        with:
+          name: usb_${{ matrix.test_app }}_test_app_bin_${{ matrix.idf_ver }}
+      - name: ⚙️ Install System tools
+        if: success() && steps.download_artifact.outcome == 'success'
+        run: |
+          apt-get update -y
+          apt-get install -y usbutils libusb-1.0-0
+      - name: Install Python packages
+        if: success() && steps.download_artifact.outcome == 'success'
+        env:
+          PIP_EXTRA_INDEX_URL: "https://dl.espressif.com/pypi/"
+        run: pip install --no-cache-dir --only-binary cryptography pytest-embedded pytest-embedded-serial-esp pytest-embedded-idf idf-ci pytest-ignore-test-results pytest-rerunfailures pyserial pyusb
+      - name: Run USB Test App on target
+        if: success() && steps.download_artifact.outcome == 'success'
+        run: |
+          # Set target argument: usb_host tests require 2 DUTs (device and host)
+          if [ "${{ matrix.runner_tag }}" = "usb_host" ]; then
+            TARGET_ARG="--target=${{ matrix.idf_target }},${{ matrix.idf_target }}"
+          else
+            TARGET_ARG="--target=${{ matrix.idf_target }}"
+          fi
+
+          # Set runner marker argument
+          MARKER_ARG="-m=${{ matrix.runner_tag }}"
+
+          if [ "${{ matrix.idf_target }}" = "esp32p4" ]; then
+            if [ "${{ matrix.eco_ver }}" = "eco_default" ]; then
+              MARKER_ARG="$MARKER_ARG and ${{ matrix.eco_ver }}"
+            else
+              MARKER_ARG="$MARKER_ARG and ${{ matrix.idf_target }}_${{ matrix.eco_ver }}"
+            fi
+          fi
+
+          # Run pytest with the configured target and marker
+          echo "Running pytest with target: $TARGET_ARG and marker: $MARKER_ARG"
+          pytest --ignore-no-tests-collected-error $TARGET_ARG "$MARKER_ARG" --build-dir=build_${{ matrix.idf_target }}_

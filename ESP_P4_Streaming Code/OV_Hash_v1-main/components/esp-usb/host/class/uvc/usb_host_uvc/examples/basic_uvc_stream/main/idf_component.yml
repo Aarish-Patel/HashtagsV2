@@ -1,0 +1,11 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf: ">=5.0"
+  espressif/usb_host_uvc:
+    version: "*"
+    override_path: "../../../../usb_host_uvc"
+  espressif/usb:
+    version: "*"
+    override_path: "../../../../../../usb"
+    rules:
+      - if: "idf_version >=5.4"                 # Use managed component only for 5.4 and above

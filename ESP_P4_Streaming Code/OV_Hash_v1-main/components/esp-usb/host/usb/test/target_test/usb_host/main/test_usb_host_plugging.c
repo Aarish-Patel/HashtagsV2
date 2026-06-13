@@ -1,0 +1,321 @@
+/*
+ * SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_err.h"
+#include "esp_intr_alloc.h"
+#include "mock_msc.h"
+#include "dev_msc.h"
+#include "msc_client.h"
+#include "ctrl_client.h"
+#include "usb/usb_host.h"
+#include "unity.h"
+
+// --------------------------------------------------- Test Cases ------------------------------------------------------
+
+/*
+Test USB Host Library Sudden Disconnection Handling (no clients)
+Purpose:
+- Test that sudden disconnections are handled properly when there are no clients
+- Test that devices can reconnect after a sudden disconnection has been handled by the USB Host Library
+
+Procedure:
+- Install USB Host Library
+- Wait for connection (and enumeration) to occur
+- Force a disconnection, then wait for disconnection to be handled (USB_HOST_LIB_EVENT_FLAGS_ALL_FREE)
+- Allow connections again, and repeat test for multiple iterations
+*/
+
+#define TEST_DCONN_NO_CLIENT_ITERATIONS     3
+
+TEST_CASE("Test USB Host sudden disconnection (no client)", "[usb_host][low_speed][full_speed][high_speed]")
+{
+    bool connected = false;
+    int dconn_iter = 0;
+    while (1) {
+        // Start handling system events
+        uint32_t event_flags;
+        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
+        if (!connected) {
+            usb_host_lib_info_t lib_info;
+            TEST_ASSERT_EQUAL(ESP_OK, usb_host_lib_info(&lib_info));
+            if (lib_info.num_devices == 1) {
+                // We've just connected. Trigger a disconnect
+                connected = true;
+                printf("Forcing Sudden Disconnect\n");
+                // Trigger a disconnect by powering OFF the root port
+                TEST_ASSERT_EQUAL(ESP_OK, usb_host_lib_set_root_port_power(false));
+            }
+        }
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            // The device has disconnected and it's disconnection has been handled
+            printf("Dconn iter %d done\n", dconn_iter);
+            if (++dconn_iter < TEST_DCONN_NO_CLIENT_ITERATIONS) {
+                // Start next iteration
+                connected = false;
+                // Allow connections again by powering ON the root port
+                TEST_ASSERT_EQUAL(ESP_OK, usb_host_lib_set_root_port_power(true));
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/*
+Test USB Host Library root port suspend with Sudden Disconnection Handling (no clients)
+Purpose:
+- Test that sudden disconnections after suspending are handled properly when there are no clients
+- Test that devices can reconnect after suspending with a sudden disconnection has been handled by the USB Host Library
+
+Procedure:
+- Install USB Host Library:
+- Wait for connection to occur and suspend the root port
+    - Let the usb_host lib to handle events caused by root port suspend call
+    - Force a disconnection, then wait for disconnection to be handled (USB_HOST_LIB_EVENT_FLAGS_ALL_FREE)
+    - Allow connections again, and repeat test for multiple iterations
+- Wait for connection to occur and suspend the root port
+    - Don't handle events (just mark the root port for suspending)
+    - Force a disconnection, then wait for disconnection to be handled (USB_HOST_LIB_EVENT_FLAGS_ALL_FREE)
+    - Allow connections again, and repeat test for multiple iterations
+*/
+
+#define TEST_DCONN_SUSPEND_ITERATIONS   6
+
+TEST_CASE("Test USB Host suspend + disconnection (no client)", "[usb_host][low_speed][full_speed][high_speed]")
+{
+    bool connected = false;
+    bool suspended = false;
+    int dconn_iter = 0;
+    while (1) {
+        // Start handling system events
+        uint32_t event_flags;
+        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
+
+        if (!connected) {
+            usb_host_lib_info_t lib_info_connected;
+            TEST_ASSERT_EQUAL(ESP_OK, usb_host_lib_info(&lib_info_connected));
+            if (lib_info_connected.num_devices == 1) {
+                // We've just connected. Trigger root port suspend
+                connected = true;
+
+                printf("Suspending the root port\n");
+                // Suspend the root port
+                TEST_ASSERT_EQUAL(ESP_OK, usb_host_lib_root_port_suspend());
+
+                // In first test variation, continue to the end of the loop, to handle events connected to the port suspend
+                // In second variation don't handle port suspend, disconnect immediately
+                if (dconn_iter < TEST_DCONN_SUSPEND_ITERATIONS / 2) {
+                    continue;
+                }
+            }
+        }
+
+        if (!suspended) {
+            usb_host_lib_info_t lib_info;
+            TEST_ASSERT_EQUAL(ESP_OK, usb_host_lib_info(&lib_info));
+            if (lib_info.num_devices == 1) {
+                // We've started suspend sequence. Trigger a disconnect
+                suspended = true;
+
+                if (dconn_iter < TEST_DCONN_SUSPEND_ITERATIONS / 2) {
+                    // Port suspend call has been handled, expect the port to be suspended
+                    TEST_ASSERT_MESSAGE(lib_info.root_port_suspended, "Root port should be suspended");
+                } else {
+                    // Port suspend call has not been handled, expect the port not to be suspended
+                    TEST_ASSERT_MESSAGE(!lib_info.root_port_suspended, "Root port should not be suspended");
+                }
+                printf("Forcing Sudden Disconnect\n");
+                // Trigger a disconnect by powering OFF the root port
+                TEST_ASSERT_EQUAL(ESP_OK, usb_host_lib_set_root_port_power(false));
+            }
+        }
+
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            // The device has disconnected and it's disconnection has been handled
+            printf("Dconn iter %d done\n", dconn_iter);
+            if (++dconn_iter < TEST_DCONN_SUSPEND_ITERATIONS) {
+                // Start next iteration
+                connected = false;
+                suspended = false;
+                // Allow connections again by powering ON the root port
+                TEST_ASSERT_EQUAL(ESP_OK, usb_host_lib_set_root_port_power(true));
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/*
+Test USB Host Library disconnect after device free (no client)
+Purpose:
+- Regression test for the race between the root port disconnect handler and the
+  device recycle path that previously aborted with ESP_ERR_NOT_FOUND from
+  dev_tree_node_dev_gone() (espressif/esp-idf#18366).
+- Verify that a HCD_PORT_EVENT_DISCONNECTION raised after the dev_tree_node has
+  already been removed via USBH_EVENT_DEV_FREE -> hub_node_recycle is handled
+  gracefully instead of aborting via ESP_ERROR_CHECK.
+
+Procedure:
+- Install USB Host Library (no client registered)
+- Wait for the device to be auto-enumerated
+- Call usb_host_device_free_all() to free the device while it's still connected.
+  With no client (open_count == 0), USBH frees the device immediately, which
+  triggers USBH_EVENT_DEV_FREE -> hub_node_recycle:
+    - root_port_recycle() queues PORT_REQ_DISABLE
+    - dev_tree_node_remove_by_parent() removes the node
+  The hub task then processes PORT_REQ_DISABLE -> HCD_PORT_CMD_DISABLE.
+- Wait for USB_HOST_LIB_EVENT_FLAGS_ALL_FREE to make sure the recycle path has
+  completed and the dev_tree_node is gone.
+- Power OFF the root port. With a connected device this raises
+  HCD_PORT_EVENT_DISCONNECTION. The disconnect handler ends up calling
+  dev_tree_node_dev_gone(NULL, idx), which now returns ESP_ERR_NOT_FOUND.
+  Without the fix this aborts via ESP_ERROR_CHECK; with the fix the
+  ESP_ERR_NOT_FOUND is treated as benign.
+- Drain events for a short period; reaching the end of the loop without an
+  abort is the regression check.
+*/
+
+TEST_CASE("Test USB Host disconnect after device free (no client)", "[usb_host][low_speed][full_speed][high_speed]")
+{
+    // Wait for the device to be enumerated
+    while (1) {
+        uint32_t event_flags;
+        usb_host_lib_handle_events(pdMS_TO_TICKS(100), &event_flags);
+        usb_host_lib_info_t lib_info;
+        TEST_ASSERT_EQUAL(ESP_OK, usb_host_lib_info(&lib_info));
+        if (lib_info.num_devices == 1) {
+            break;
+        }
+    }
+    printf("Device enumerated\n");
+
+    // Free the device while still physically connected. This drives:
+    //   USBH_EVENT_DEV_FREE -> hub_node_recycle:
+    //       - root_port_recycle queues PORT_REQ_DISABLE
+    //       - dev_tree_node is removed
+    //   Hub task: PORT_REQ_DISABLE -> hcd_port_command(HCD_PORT_CMD_DISABLE)
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FINISHED, usb_host_device_free_all());
+
+    // Wait for ALL_FREE: dev_tree_node has been removed and the root port has
+    // been disabled.
+    while (1) {
+        uint32_t event_flags;
+        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            break;
+        }
+    }
+    printf("All devices freed\n");
+    // Brief delay to let the hub task fully process PORT_REQ_DISABLE
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Power OFF the root port. With a connected device this raises
+    // HCD_PORT_EVENT_DISCONNECTION. Without the fix the disconnect handler
+    // would call dev_tree_node_dev_gone(NULL, idx), which now returns
+    // ESP_ERR_NOT_FOUND because the dev_tree_node was already removed by
+    // hub_node_recycle, and ESP_ERROR_CHECK would abort.
+    printf("Forcing Sudden Disconnect (root port power OFF)\n");
+    TEST_ASSERT_EQUAL(ESP_OK, usb_host_lib_set_root_port_power(false));
+
+    // Drain events for ~500 ms so the disconnect event is fully handled.
+    // Reaching the end of this loop without an abort is the regression check.
+    for (int i = 0; i < 25; i++) {
+        uint32_t event_flags;
+        usb_host_lib_handle_events(pdMS_TO_TICKS(20), &event_flags);
+    }
+}
+
+/*
+Test USB Host Library Sudden Disconnection Handling (with client)
+Purpose:
+- Test that sudden disconnections are handled properly when there are registered clients
+- Test that devices can reconnect after a sudden disconnection has been handled by the USB Host Library
+
+Procedure:
+    - Install USB Host Library
+    - Create a task to run an MSC client
+    - Start the MSC disconnect client task. It will open the device then force a disconnect for multiple iterations
+    - Wait for USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS and USB_HOST_LIB_EVENT_FLAGS_ALL_FREE before uninstalling
+*/
+
+#define TEST_FORCE_DCONN_NUM_TRANSFERS      3
+#define TEST_MSC_SCSI_TAG                   0xDEADBEEF
+
+TEST_CASE("Test USB Host sudden disconnection (single client)", "[usb_host][full_speed][high_speed]")
+{
+    // Create task to run client that communicates with MSC SCSI interface
+    const dev_msc_info_t *dev_info = dev_msc_get_info();
+    msc_client_test_param_t params = {
+        .num_sectors_to_read = 1,   // Unused by disconnect MSC client
+        .num_sectors_per_xfer = TEST_FORCE_DCONN_NUM_TRANSFERS * dev_info->scsi_sector_size,
+        .msc_scsi_xfer_tag = TEST_MSC_SCSI_TAG,
+    };
+    TaskHandle_t task_hdl = NULL;
+    xTaskCreatePinnedToCore(msc_client_async_dconn_task, "async", 4096, (void *)&params, 2, &task_hdl, 0);
+    // Start the task
+    xTaskNotifyGive(task_hdl);
+
+    bool all_clients_gone = false;
+    bool all_dev_free = false;
+    while (!all_clients_gone || !all_dev_free) {
+        // Start handling system events
+        uint32_t event_flags;
+        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
+            printf("No more clients\n");
+            all_clients_gone = true;
+        }
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            printf("All device's freed\n");
+            all_dev_free = true;
+        }
+    }
+}
+
+/*
+Test USB Host Library Enumeration
+Purpose:
+- Test that the USB Host Library enumerates device correctly
+
+Procedure:
+- Install USB Host Library
+- Create a task to run an MSC client
+- Start the MSC enumeration client task. It will:
+    - Wait for device connection
+    - Open the device
+    - Check details of the device's enumeration
+    - Disconnect the device, and repeat the steps above for multiple iterations.
+- Wait for USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS and USB_HOST_LIB_EVENT_FLAGS_ALL_FREE before uninstalling
+*/
+
+TEST_CASE("Test USB Host enumeration", "[usb_host][full_speed][high_speed]")
+{
+    // Create task to run client that checks the enumeration of the device
+    TaskHandle_t task_hdl = NULL;
+    xTaskCreatePinnedToCore(msc_client_async_enum_task, "async", 6144, NULL, 2, &task_hdl, 0);
+    // Start the task
+    xTaskNotifyGive(task_hdl);
+
+    bool all_clients_gone = false;
+    bool all_dev_free = false;
+    while (!all_clients_gone || !all_dev_free) {
+        // Start handling system events
+        uint32_t event_flags;
+        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
+            printf("No more clients\n");
+            TEST_ASSERT_EQUAL(ESP_ERR_NOT_FINISHED, usb_host_device_free_all());
+            all_clients_gone = true;
+        }
+        if (all_clients_gone && event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            all_dev_free = true;
+        }
+    }
+}

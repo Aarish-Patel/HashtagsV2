@@ -1,0 +1,33 @@
+# Config file for build_idf_examples.yml workflow
+
+paths = [
+    "examples/peripherals/usb/device",      # USB Device examples
+    "examples/peripherals/usb/host",        # USB Host examples
+    "examples/network/sta2eth",             # Networking example using USB Device
+]
+
+# exclude cherryusb build
+exclude = [
+    "examples/peripherals/usb/device/cherryusb_serial_device",
+    "examples/peripherals/usb/host/cherryusb_host"
+]
+
+recursive = true
+check_warnings = true
+target = "all"
+enable_preview_targets = true
+
+# build related options
+build_dir = "build_@t_@w"
+
+# use ignore_build_warnings.txt from esp-idf
+ignore_warning_files = [
+    'tools/ci/ignore_build_warnings.txt',
+]
+
+# config rules
+config_rules = [
+    'sdkconfig.ci=default',
+    'sdkconfig.ci.*=',
+    '=default',
+]

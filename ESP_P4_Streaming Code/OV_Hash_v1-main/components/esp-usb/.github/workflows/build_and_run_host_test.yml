@@ -1,0 +1,41 @@
+# This workflow builds and runs all Linux target host tests:
+#
+#   - usb host class drivers linux host tests with fully mocked USB Component
+#   - usb component linux host tests with selectively mocked USB Component
+#   - Linux host tests are run only for IDF Latest release
+
+name: Build and Run USB Host test
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  build:
+    name: Build and Run
+    strategy:
+      fail-fast: false
+      matrix:
+        idf_ver: ["latest"]
+    runs-on: ubuntu-latest
+    container: espressif/idf:${{ matrix.idf_ver }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: 'true'
+      - name: ⚙️ Install Python dependencies
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          pip install pytest pytest-embedded pytest-embedded-serial-esp pytest-embedded-idf pyusb idf-ci idf-build-apps==3.0.1 --upgrade
+      - name: Build
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          idf-build-apps find --target linux
+          idf-build-apps build --target linux
+      - name: Run
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          pytest --target=linux -m host_test --build-dir=build_linux_default

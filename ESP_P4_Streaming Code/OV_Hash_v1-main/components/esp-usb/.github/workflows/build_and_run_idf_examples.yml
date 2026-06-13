@@ -1,0 +1,259 @@
+# This workflow builds and runs usb host and usb device esp-idf examples with overridden local components:
+#
+# Build:
+#   - usb device examples: with overridden esp_tinyusb from esp-usb/device/esp_tinyusb
+#
+#   - usb host examples:
+#     - Overridden usb component from esp-usb/host/usb and overridden class drivers from esp-usb/host/class
+#       - Only service IDF releases
+#     - Overridden class drivers from esp-usb/host/class
+#       - All (service + maintenance IDF releases)
+#
+#    - Networking example using USB Device: with overridden esp_tinyusb from esp-usb/device/esp_tinyusb
+#
+#   - cherryusb examples are ignored
+#   - usb_host_lib example -> manifest file must be created for IDF < 6.0 to override usb component
+#
+# Run:
+#   - usb device examples:
+#     - usb_device target runners, with matrix of all listed releases
+#     - IDF Releases: IDF >= 5.3
+#   - usb host examples:
+#     - usb_host_examples target runners, with matrix of all listed releases
+#     - IDF Releases: IDF >= 5.3
+#
+# Temporarily disabled tests and TODOs of this workflow:
+# - USB Device NCM example run: Ignored due to GH Runner configuration (docker needs --net=host to access host network namespace)
+# - Examples runs on targets enabled only for IDF >= 5.3
+
+name: Build and Run ESP-IDF USB examples
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  schedule:
+    - cron: '0 0 * * 0' # Run at 00:00 on Sunday
+
+jobs:
+  build:
+    # Run the workflow, only with BUILD_AND_TEST_IDF_EXAMPLES PR Label or when scheduled
+    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'BUILD_AND_TEST_IDF_EXAMPLES')
+    strategy:
+      fail-fast: true
+      matrix:
+        idf_ver:
+          [
+            "release-v5.2",
+            "release-v5.3",
+            "release-v5.4",
+            "release-v5.5",
+            "release-v6.0",
+            "latest",
+          ]
+    runs-on: ubuntu-latest
+    container: espressif/idf:${{ matrix.idf_ver }}
+    permissions:
+      pull-requests: read
+    env:
+      CONFIG_PATH: ${{ github.workspace }}/.github/ci/.idf_build_examples_config.toml
+      MANIFEST_PATH: ${{ github.workspace }}/.github/ci/.idf-build-examples-rules.yml
+      USB_EXAMPLES_PATH: ${{ github.workspace }}  # Will be set-up in "Setup IDF Examples path" step
+      NETWORK_EXAMPLES_PATH: ${{ github.workspace }}  # Will be set-up in "Setup IDF Examples path" step
+      PYTHONWARNINGS: "ignore"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: "true"
+      - name: Install Python deps
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          pip install --no-cache-dir idf-build-apps==3.0.1 pyyaml --upgrade
+      - name: Setup IDF Examples path
+        run: |
+
+          # USB Host and USB Device examples path
+          echo "USB_EXAMPLES_PATH=${IDF_PATH}/examples/peripherals/usb" >> $GITHUB_ENV
+
+          # Networking example using USB Device path
+          echo "NETWORK_EXAMPLES_PATH=${IDF_PATH}/examples/network/sta2eth" >> $GITHUB_ENV
+      - name: Override device component
+        run: |
+          . ${IDF_PATH}/export.sh
+          python .github/ci/override_managed_component.py esp_tinyusb device/esp_tinyusb ${{ env.USB_EXAMPLES_PATH }}/device/*
+          python .github/ci/override_managed_component.py esp_tinyusb device/esp_tinyusb ${{ env.NETWORK_EXAMPLES_PATH }}
+      - name: Override class components
+        # Override all class drivers for all IDF releases
+        run: |
+          . ${IDF_PATH}/export.sh
+
+          # cdc_acm_host example was merged with cdc_acm_vcp example in IDF 6.1
+          # Check if the path to the cdc_acm_vcp example exist
+          if [[ -d "${{ env.USB_EXAMPLES_PATH }}/host/cdc/cdc_acm_vcp" ]]; then
+            VCP_EXAMPLE_EXIST=true
+            CDC_VCP_EXAMPLE_PATH="${{ env.USB_EXAMPLES_PATH }}/host/cdc/cdc_acm_vcp"
+          else
+            VCP_EXAMPLE_EXIST=false
+            CDC_VCP_EXAMPLE_PATH="${{ env.USB_EXAMPLES_PATH }}/host/cdc"
+          fi
+
+          # usb_host_cdc_acm component
+          python .github/ci/override_managed_component.py usb_host_cdc_acm host/class/cdc/usb_host_cdc_acm "${{ env.USB_EXAMPLES_PATH }}/host/cdc"
+
+          # usb_host_ch34x_vcp component
+          python .github/ci/override_managed_component.py usb_host_ch34x_vcp host/class/cdc/usb_host_ch34x_vcp "$CDC_VCP_EXAMPLE_PATH"
+
+          # usb_host_cp210x_vcp component
+          python .github/ci/override_managed_component.py usb_host_cp210x_vcp host/class/cdc/usb_host_cp210x_vcp "$CDC_VCP_EXAMPLE_PATH"
+
+          # usb_host_ftdi_vcp component
+          python .github/ci/override_managed_component.py usb_host_ftdi_vcp host/class/cdc/usb_host_ftdi_vcp "$CDC_VCP_EXAMPLE_PATH"
+
+          # usb_host_vcp component is used only in cdc_acm_vcp example
+          if $VCP_EXAMPLE_EXIST; then
+            python .github/ci/override_managed_component.py usb_host_vcp host/class/cdc/usb_host_vcp "$CDC_VCP_EXAMPLE_PATH"
+          fi
+
+          # usb_host_hid component
+          python .github/ci/override_managed_component.py usb_host_hid host/class/hid/usb_host_hid "${{ env.USB_EXAMPLES_PATH }}/host/hid"
+
+          # usb_host_msc component
+          python .github/ci/override_managed_component.py usb_host_msc host/class/msc/usb_host_msc "${{ env.USB_EXAMPLES_PATH }}/host/msc"
+
+          # usb_host_uvc component
+          python .github/ci/override_managed_component.py usb_host_uvc host/class/uvc/usb_host_uvc "${{ env.USB_EXAMPLES_PATH }}/host/uvc"
+
+      - name: Create component manifest file for usb_host_lib
+        # Create manifest file for usb_host_lib example, because the examples do not have it for IDF < 6.0
+        # and we need to override the usb component
+        if: contains('release-v5.4 release-v5.5', matrix.idf_ver)
+        working-directory: ${{ env.USB_EXAMPLES_PATH }}/host/usb_host_lib/main
+        run: |
+          python3 - << 'EOF'
+          content = """## IDF Component Manager Manifest File
+          dependencies:
+            espressif/usb: "*"
+          """
+          with open("idf_component.yml", "w") as f:
+              f.write(content)
+          EOF
+
+          if [ -f idf_component.yml ]; then
+            echo "✅ File created successfully." && cat idf_component.yml
+          else
+            echo "❌ File was not created"
+            exit 1
+          fi
+      - name: Override usb component
+        # Override usb host component only for service releases
+        if: contains('release-v5.4 release-v5.5 release-v6.0 latest', matrix.idf_ver)
+        run: |
+          . ${IDF_PATH}/export.sh
+          python .github/ci/override_managed_component.py usb host/usb ${{ env.USB_EXAMPLES_PATH }}/host/*
+      - name: Build ESP-IDF ${{ matrix.idf_ver }} USB examples
+        # Build esp-idf examples with overridden components
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          cd ${IDF_PATH}
+
+          # Export compiler flags
+          export PEDANTIC_FLAGS="-DIDF_CI_BUILD -Werror -Werror=deprecated-declarations -Werror=unused-variable -Werror=unused-but-set-variable -Werror=unused-function"
+          export EXTRA_CFLAGS="${PEDANTIC_FLAGS} -Wstrict-prototypes"
+          export EXTRA_CXXFLAGS="${PEDANTIC_FLAGS}"
+
+          idf-build-apps find --config-file ${CONFIG_PATH} --manifest-file ${MANIFEST_PATH}
+          idf-build-apps build --config-file ${CONFIG_PATH} --manifest-file ${MANIFEST_PATH}
+
+      - uses: actions/upload-artifact@v6
+        # Upload build files, pytest files and sdkconfig files, only from USB Host and USB Device examples
+        with:
+          name: usb_examples_bin_${{ matrix.idf_ver }}
+          path: |
+            ${{ env.USB_EXAMPLES_PATH }}/**/build_esp*/bootloader/bootloader.bin
+            ${{ env.USB_EXAMPLES_PATH }}/**/build_esp*/partition_table/partition-table.bin
+            ${{ env.USB_EXAMPLES_PATH }}/**/build_esp*/*.bin
+            ${{ env.USB_EXAMPLES_PATH }}/**/build_esp*/*.elf
+            ${{ env.USB_EXAMPLES_PATH }}/**/build_esp*/flasher_args.json
+            ${{ env.USB_EXAMPLES_PATH }}/**/build_esp*/config/sdkconfig.json
+            ${{ env.USB_EXAMPLES_PATH }}/**/pytest_*.py
+            ${{ env.USB_EXAMPLES_PATH }}/**/sdkconfig.*
+            !${{ env.USB_EXAMPLES_PATH }}/**/managed_components/**
+          if-no-files-found: error
+
+  run:
+    # Run on target runners
+    if: ${{ github.repository_owner == 'espressif' }}
+    needs: build
+    strategy:
+      fail-fast: true
+      matrix:
+        idf_ver:
+          [
+            # Only run for IDF >= 5.3,
+            # For lower IDF versions, running pytest files from esp-idf outside of esp-idf container is too complicated
+            "release-v5.3",
+            "release-v5.4",
+            "release-v5.5",
+            "release-v6.0",
+            "latest",
+          ]
+        idf_target: ["esp32s2", "esp32p4"]
+        runner_tag: ["usb_host_flash_disk", "usb_device"]
+        eco_ver: ["eco_default", "eco4"]
+        include:
+          # Assign a folder structure to a target runner
+          - runner_tag: usb_host_flash_disk
+            example: host
+          - runner_tag: usb_device
+            example: device
+        exclude:
+          # Exclude eco4 version for esp32s2
+          - idf_target: "esp32s2"
+            eco_ver: "eco4"
+          # Exclude eco_default for older IDF versions, esp32p4 ECO6 support starts in IDF 5.5
+          - idf_target: "esp32p4"
+            eco_ver: "eco_default"
+            idf_ver: "release-v5.4"
+          - idf_target: "esp32p4"
+            eco_ver: "eco_default"
+            idf_ver: "release-v5.3"
+          # Exclude eco4 for newer IDF versions, esp32p4 ECO6 is default in IDF 5.5 and later
+          - idf_target: "esp32p4"
+            eco_ver: "eco4"
+            idf_ver: "release-v5.5"
+          - idf_target: "esp32p4"
+            eco_ver: "eco4"
+            idf_ver: "release-v6.0"
+          - idf_target: "esp32p4"
+            eco_ver: "eco4"
+            idf_ver: "latest"
+    runs-on: [self-hosted, linux, docker, "${{ matrix.idf_target }}", "${{ matrix.runner_tag }}", "${{ matrix.eco_ver }}"]
+    container:
+      image: python:3.11-bookworm
+      options: --privileged --device-cgroup-rule="c 188:* rmw" --device-cgroup-rule="c 166:* rmw"
+    env:
+      USB_EXAMPLES_PATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: ⚙️ Install System tools
+        run: |
+          apt-get update -y
+          apt-get install -y --no-install-recommends net-tools
+      - name: ⚙️ Install Python packages
+        env:
+          PIP_EXTRA_INDEX_URL: "https://dl.espressif.com/pypi/"
+        run: pip install --no-cache-dir --only-binary cryptography pytest-embedded pytest-embedded-serial-esp pytest-embedded-idf pyserial pyusb netifaces idf-ci pytest-ignore-test-results
+      - name: Setup IDF Examples path
+      # Create matrix-specific directory name and save it's path to the USB_EXAMPLES_PATH variable
+        run: |
+          EXAMPLES_DIR="idf_examples_${{ matrix.idf_ver }}_${{ matrix.idf_target }}_${{ matrix.runner_tag }}_${{ matrix.eco_ver }}"
+          mkdir -p "$EXAMPLES_DIR" && cd "$EXAMPLES_DIR" && pwd
+          echo "USB_EXAMPLES_PATH=$(pwd)" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v7
+        with:
+          name: usb_examples_bin_${{ matrix.idf_ver }}
+          path: ${{ env.USB_EXAMPLES_PATH }}
+      - name: Run USB Test App on target
+        run: |
+          pytest ${{ env.USB_EXAMPLES_PATH }}/${{ matrix.example }} --target ${{ matrix.idf_target }} -m ${{ matrix.runner_tag }} --ignore-result-cases="*ncm_example*"

@@ -1,0 +1,52 @@
+name: Push components to Espressif Component Service
+
+on:
+  # For pull requests: perform upload with "--dry-run" argument,
+  # i.e. validate that the component passes all checks for being uploaded.
+  pull_request:
+
+  # For pushes to master: actually upload the components to the registry.
+  push:
+    branches:
+      - master
+
+jobs:
+  upload_components:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: 'recursive'
+      - run: |
+          echo "${{ ( github.ref_name != 'master' || github.repository_owner != 'espressif' ) && 'Checking' || 'Uploading' }} components"
+      - name: Upload components to component service
+        uses: espressif/upload-components-ci-action@v2
+        with:
+          # Please try to keep the directories list sorted.
+          #
+          # Do note, however, that if you are updating two components in the same PR
+          # and one depends on the other, the new version of the 2nd component won't
+          # be found in the registry when the 1st component is uploaded.
+          #
+          # This is only a problem if you are adding two components for the first time,
+          # or if the 2nd component depends on the exact (new) version of the first one.
+          #
+          components: |
+            device/esp_tinyusb
+            host/class/cdc/esp_modem_usb_dte
+            host/class/cdc/usb_host_cdc_acm
+            host/class/cdc/usb_host_ch34x_vcp
+            host/class/cdc/usb_host_cp210x_vcp
+            host/class/cdc/usb_host_ftdi_vcp
+            host/class/cdc/usb_host_vcp
+            host/class/hid/usb_host_hid
+            host/class/msc/usb_host_msc
+            host/class/uac/usb_host_uac
+            host/class/uvc/usb_host_uvc
+            host/usb
+            type_c/usb_tcpm
+          namespace: "espressif"
+          # API token will only be available in the master branch in the main repository.
+          # However, dry-run doesn't require a valid token.
+          api_token: ${{ secrets.IDF_COMPONENT_API_TOKEN }}
+          dry_run: ${{ github.ref_name != 'master' || github.repository_owner != 'espressif' }}

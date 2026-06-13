@@ -1,0 +1,11 @@
+dependencies:
+  idf: ">=5.4"
+  esp_video:
+    version: "*"
+  esp_cam_sensor:
+    version: "*"
+  esp_ipa:
+    version: "*"
+  usb_device_uvc:
+    version: "*"
+    override_path: "../components/usb_device_uvc"

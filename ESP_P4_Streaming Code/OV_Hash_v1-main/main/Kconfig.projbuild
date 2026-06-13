@@ -1,0 +1,149 @@
+menu "UVC Webcam Configuration"
+
+    menu "ISP Color Profile"
+        choice ISP_DEFAULT_PROFILE_CHOICE
+            prompt "Default ISP color temperature profile"
+            default ISP_PROFILE_DAYLIGHT
+            help
+                Select the default ISP color correction profile applied at camera start.
+                Each profile contains a Color Correction Matrix and White Balance gains
+                tuned for a specific lighting condition (from RPi libcamera OV5647 calibration).
+
+            config ISP_PROFILE_TUNGSTEN
+                bool "Tungsten (2873K)"
+            config ISP_PROFILE_INDOOR_WARM
+                bool "Indoor-Warm (3725K)"
+            config ISP_PROFILE_FLUORESCENT
+                bool "Fluorescent (5095K)"
+            config ISP_PROFILE_DAYLIGHT
+                bool "Daylight (6015K)"
+            config ISP_PROFILE_CLOUDY
+                bool "Cloudy (6865K)"
+            config ISP_PROFILE_SHADE
+                bool "Shade (7600K)"
+        endchoice
+
+        config ISP_DEFAULT_PROFILE_INDEX
+            int
+            default 0 if ISP_PROFILE_TUNGSTEN
+            default 1 if ISP_PROFILE_INDOOR_WARM
+            default 2 if ISP_PROFILE_FLUORESCENT
+            default 3 if ISP_PROFILE_DAYLIGHT
+            default 4 if ISP_PROFILE_CLOUDY
+            default 5 if ISP_PROFILE_SHADE
+    endmenu
+
+    menu "MJPEG Settings"
+        config UVC_JPEG_QUALITY
+            int "JPEG compression quality"
+            default 80
+            range 1 100
+            help
+                JPEG compression quality (1=worst, 100=best).
+    endmenu
+
+    menu "H.264 Settings"
+        config UVC_H264_BITRATE
+            int "H.264 bitrate (bps)"
+            default 1000000
+            range 25000 2500000
+            help
+                H.264 encoder target bitrate in bits per second.
+
+        config UVC_H264_I_PERIOD
+            int "H.264 I-frame period"
+            default 30
+            range 1 120
+            help
+                Number of frames between I-frames.
+
+        config UVC_H264_MIN_QP
+            int "H.264 minimum QP"
+            default 25
+            range 0 51
+            help
+                H.264 minimum quantization parameter (lower = better quality).
+
+        config UVC_H264_MAX_QP
+            int "H.264 maximum QP"
+            default 50
+            range 0 51
+            help
+                H.264 maximum quantization parameter (higher = more compression).
+    endmenu
+
+    menu "Ethernet / RTSP"
+        choice ETH_IP_MODE
+            prompt "Ethernet IP address mode"
+            default ETH_IP_STATIC
+            help
+                Select whether to use a static IP address or DHCP for Ethernet.
+
+            config ETH_IP_STATIC
+                bool "Static IP"
+            config ETH_IP_DHCP
+                bool "DHCP"
+        endchoice
+
+        config ETH_STATIC_IP
+            string "Static IP address"
+            default "192.168.0.200"
+            depends on ETH_IP_STATIC
+            help
+                Static IPv4 address for the Ethernet interface.
+
+        config ETH_STATIC_NETMASK
+            string "Netmask"
+            default "255.255.255.0"
+            depends on ETH_IP_STATIC
+            help
+                Subnet mask for the Ethernet interface.
+
+        config ETH_STATIC_GATEWAY
+            string "Gateway"
+            default "192.168.0.1"
+            depends on ETH_IP_STATIC
+            help
+                Default gateway for the Ethernet interface.
+
+        config ETH_RTSP_PORT
+            int "RTSP server port"
+            default 554
+            range 1 65535
+            help
+                TCP port for the RTSP server.
+
+        config RTSP_H264_BITRATE
+            int "RTSP H.264 bitrate (bps)"
+            default 8000000
+            range 500000 20000000
+            help
+                H.264 target bitrate for RTSP streaming.
+                Recommended: 4-8 Mbps for 1080p over 100Mbps Ethernet.
+
+        config RTSP_H264_I_PERIOD
+            int "RTSP H.264 I-frame period (GOP size)"
+            default 10
+            range 1 120
+            help
+                Frames between IDR frames for RTSP.
+                Lower = faster seek/channel-switch, higher = better compression.
+                10 = IDR every 333ms at 30fps (good latency/quality balance).
+
+        config RTSP_H264_MIN_QP
+            int "RTSP H.264 minimum QP"
+            default 20
+            range 0 51
+            help
+                Lower QP = higher quality IDR frames. 20 is good for 1080p.
+
+        config RTSP_H264_MAX_QP
+            int "RTSP H.264 maximum QP"
+            default 38
+            range 0 51
+            help
+                Higher QP = more compression on P-frames.
+                38 preserves detail at 1080p. 50 is visibly blocky.
+    endmenu
+
+endmenu

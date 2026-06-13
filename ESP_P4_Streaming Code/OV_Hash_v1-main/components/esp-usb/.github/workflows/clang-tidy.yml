@@ -1,0 +1,60 @@
+name: Run clang-tidy
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    name: Run clang-tidy
+    runs-on: ubuntu-latest
+    container: espressif/idf:latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: 'true'
+      - name: Install esp-clang
+        run: |
+          ${IDF_PATH}/tools/idf_tools.py --non-interactive install esp-clang
+      - name: Install clang-tidy-sarif
+        run: |
+          curl -sSL https://github.com/psastras/sarif-rs/releases/download/clang-tidy-sarif-v0.3.3/clang-tidy-sarif-x86_64-unknown-linux-gnu -o clang-tidy-sarif
+          chmod +x clang-tidy-sarif
+      - name: Install pyclang
+        run: |
+          cd ${IDF_PATH}
+          . ./export.sh
+          pip install pyclang~=0.2.0
+      - name: Run code analysis
+        shell: bash
+        env:
+          IDF_TOOLCHAIN: clang
+          IDF_TARGET: esp32s3
+        working-directory: static_analysis
+        run: |
+          . ${IDF_PATH}/export.sh
+          idf.py reconfigure
+          idf.py clang-check --include-paths $GITHUB_WORKSPACE --exclude-paths $PWD --run-clang-tidy-py run-clang-tidy
+          cp warnings.txt ../
+      - name: Convert clang-tidy results into SARIF output
+        run: |
+          export PATH=$PWD:$PATH
+          ./clang-tidy-sarif -o results.sarif.raw warnings.txt
+          python3 $GITHUB_WORKSPACE/.github/filter_sarif.py -o results.sarif --include-prefix ${GITHUB_WORKSPACE}/ results.sarif.raw
+      - uses: actions/upload-artifact@v6
+        with:
+          path: |
+            warnings.txt
+            results.sarif
+            results.sarif.raw
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif
+          category: clang-tidy

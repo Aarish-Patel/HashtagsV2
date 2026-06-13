@@ -1,0 +1,20 @@
+exclude = [
+    "static_analysis",
+    "device/esp_tinyusb/test_apps/usb_cv",
+]
+recursive = true
+manifest_file = ".build-test-rules.yml"
+check_warnings = true
+ignore_warning_file = ".ignore_build_warnings.txt"
+target = "all"
+enable_preview_targets = true
+
+# build related options
+build_dir = "build_@t_@w"
+
+# config rules
+config_rules = [
+    'sdkconfig.ci=default',
+    'sdkconfig.ci.*=',
+    '=default',
+]

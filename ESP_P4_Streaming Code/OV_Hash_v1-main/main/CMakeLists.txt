@@ -1,0 +1,24 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "camera_pipeline.c"
+        "encoder_manager.c"
+        "uvc_streaming.c"
+        "uvc_controls.c"
+        "perf_monitor.c"
+        "eth_init.c"
+        "http_server.c"
+    INCLUDE_DIRS
+        "."
+    PRIV_REQUIRES
+        esp_timer
+        esp_hw_support
+        esp_cam_sensor
+        esp_video
+        espressif__tinyusb
+        usb_device_uvc
+        esp_eth
+        esp_netif
+        esp_event
+        esp_http_server
+)
