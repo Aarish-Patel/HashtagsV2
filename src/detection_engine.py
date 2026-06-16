@@ -46,9 +46,33 @@ def _get_person_model(model_path: str = None, device: str = "cuda:0"):
     with _model_lock:
         if _yolo_person_model is None:
             from ultralytics import YOLO
-            path = model_path or "yolov8x.pt"
-            print(f"Loading YOLOv8 person model from {path} on device={device}...")
-            _yolo_person_model = YOLO(path)
+            base_path = model_path or "yolov8x.pt"
+            
+            # --- Model Optimization Hunt ---
+            # Suggestion #2: TensorRT / ONNX Optimization
+            # Try to load the fastest available format in order of priority:
+            # 1. TensorRT (.engine)
+            # 2. ONNX (.onnx)
+            # 3. PyTorch native (.pt)
+            
+            path_no_ext = os.path.splitext(base_path)[0]
+            engine_path = f"{path_no_ext}.engine"
+            onnx_path = f"{path_no_ext}.onnx"
+            
+            if os.path.exists(engine_path):
+                load_path = engine_path
+                print(f"[OPTIMIZATION] TensorRT engine found! Using {load_path}")
+            elif os.path.exists(onnx_path):
+                load_path = onnx_path
+                print(f"[OPTIMIZATION] ONNX model found! Using {load_path}")
+            else:
+                load_path = base_path
+                print(f"[OPTIMIZATION] No TensorRT/ONNX found. Falling back to native PyTorch {load_path}")
+
+            print(f"Loading YOLOv8 person model from {load_path} on device={device}...")
+            _yolo_person_model = YOLO(load_path)
+            
+            # For ONNX/TensorRT, passing device ensures data stays on GPU
             _yolo_person_model.to(device)
     return _yolo_person_model
 
@@ -344,11 +368,11 @@ class DetectionEngine:
 
     def __init__(
         self,
-        person_model_path: str = "yolov8x.pt",
+        person_model_path: str = "yolov8s.pt",
         device: Optional[str] = None,
-        person_conf: float = 0.35,    # Raised from 0.15 — critical for zero false positives
+        person_conf: float = 0.10,    # Lowered to detect partial bodies/crawling
         weapon_conf: float = 0.40,
-        img_size: int = 640,          # Standard YOLOv8 resolution (800 fails on close-ups)
+        img_size: int = 640,          # Standard YOLOv8 resolution
     ):
         import torch
         self.device = device if device else ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -360,6 +384,10 @@ class DetectionEngine:
         # Models loaded lazily on first call
         self._person_model = None
         self._inference_lock = threading.Lock()
+        
+        # Fallback for extreme close-ups
+        import cv2
+        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
         print(f"[ENGINE] DetectionEngine v3 initialized. Device={self.device}, "
               f"PersonConf={person_conf}, ImgSize={img_size}")
@@ -433,9 +461,15 @@ class DetectionEngine:
         conf_override allows per-node tuning without changing engine global state.
         """
         conf = conf_override if conf_override is not None else self.person_conf
+        
+        import cv2
+        # Grayscale preprocessing for NoIR cameras (Pink tint fix)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame_for_inference = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
         results = self._person_model(
-            frame,
-            classes=[0],
+            frame_for_inference,
+            classes=[0, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
             conf=conf,
             device=self.device,
             verbose=False,
@@ -444,10 +478,18 @@ class DetectionEngine:
         )
 
         verified = []
-        for b in results[0].boxes.data.cpu().numpy():
-            x1, y1, x2, y2, conf_val = b[:5]
-            bbox = (int(x1), int(y1), int(x2-x1), int(y2-y1))
+        frame_h, frame_w = frame.shape[:2]
+        
+        COCO_CLASSES = {
+            0: "Person", 14: "Bird", 15: "Cat", 16: "Dog", 17: "Horse", 
+            18: "Sheep", 19: "Cow", 20: "Elephant", 21: "Bear", 22: "Zebra", 23: "Giraffe"
+        }
 
+        for b in results[0].boxes.data.cpu().numpy():
+            x1, y1, x2, y2, conf_val, cls_id = b[:6]
+            bbox = (int(x1), int(y1), int(x2-x1), int(y2-y1))
+            cls_name = COCO_CLASSES.get(int(cls_id), "Animal")
+            
             is_tracked = False
             if active_boxes:
                 for ab in active_boxes:
@@ -468,11 +510,38 @@ class DetectionEngine:
             verified.append(Detection(
                 x=bbox[0], y=bbox[1], w=bbox[2], h=bbox[3],
                 confidence=float(conf_val),
-                class_name="Person",
+                class_name=cls_name,
                 source=source,
                 keypoints=None,
                 metadata={}
             ))
+
+        # --- FALLBACK: Extreme Close-Up Face Detection ---
+        # YOLOv8 struggles when the frame is 90% face/head.
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
+            for (x, y, w, h) in faces:
+                # Expand the box slightly downward to cover shoulders
+                bbox = (x, y, w, int(h * 1.5))
+                
+                is_duplicate = False
+                for v in verified:
+                    if compute_iou(bbox, v.bbox) > 0.1 or compute_containment(bbox, v.bbox) > 0.5:
+                        is_duplicate = True
+                        break
+                        
+                if not is_duplicate:
+                    verified.append(Detection(
+                        x=bbox[0], y=bbox[1], w=bbox[2], h=bbox[3],
+                        confidence=0.85,
+                        class_name="Person",
+                        source="face_fallback",
+                        keypoints=None,
+                        metadata={}
+                    ))
+        except Exception as e:
+            pass
 
         return verified
 

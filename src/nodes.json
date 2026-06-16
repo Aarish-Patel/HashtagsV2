@@ -1,0 +1,30 @@
+[
+  {
+    "id": "HASH-1",
+    "name": "Tiger Chongjang",
+    "stream_url": "http://192.168.0.200/stream",
+    "lat": 24.165566,
+    "lng": 94.259984
+  },
+  {
+    "id": "HASH-2",
+    "name": "Pangal Sangjai",
+    "stream_url": "http://192.168.1.100/stream",
+    "lat": 24.18,
+    "lng": 94.26
+  },
+  {
+    "id": "HASH-3",
+    "name": "RPi GStreamer TCP",
+    "stream_url": "rawgst:640:480:gst-launch-1.0.exe -q tcpclientsrc host=192.168.0.7 port=5000 ! gdpdepay ! rtph264depay ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,format=BGR,width=640,height=480 ! fdsink fd=1 sync=false",
+    "lat": 24.175,
+    "lng": 94.255
+  },
+  {
+    "id": "HASH-4",
+    "name": "Node 201",
+    "stream_url": "http://192.168.0.201:81/stream",
+    "lat": 24.172,
+    "lng": 94.258
+  }
+]

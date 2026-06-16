@@ -1,9 +1,0 @@
-@echo off
-echo Waiting 15 minutes to ensure WiderPerson extraction finishes...
-timeout /t 900 /nobreak
-
-echo Preparing datasets...
-py -3.11 dataset_manager.py --source datasets/tinyperson --format yolo --output datasets/ready_tinyperson --augmentations 1
-
-echo Training heavy model (yolov8x.pt)...
-py -3.11 train_pipeline.py --data datasets/ready_tinyperson/dataset.yaml --model yolov8x.pt --epochs 100 --batch 4 --name heavy_person_detect

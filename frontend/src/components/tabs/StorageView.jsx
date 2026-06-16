@@ -29,7 +29,10 @@ const StorageView = ({
       e.stopPropagation();
       if (window.confirm(`PERMANENTLY DELETE FORENSIC INCIDENT: ${filename}?`)) {
          try {
-            await fetch(`${API_BASE}/api/incidents/${filename}`, { method: 'DELETE' });
+            await fetch(`${API_BASE}/api/incidents/${filename}`, { 
+               method: 'DELETE',
+               headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+            });
             if (selectedClip === filename) setSelectedClip(null);
          } catch (err) {
             console.error("Delete failed", err);
@@ -40,7 +43,10 @@ const StorageView = ({
    const handleClearAll = async () => {
       if (window.confirm("PERMANENTLY DELETE ALL REPLAYS? This action cannot be undone.")) {
          try {
-            await fetch(`${API_BASE}/api/clips/clear`, { method: 'DELETE' });
+            await fetch(`${API_BASE}/api/clips/clear`, { 
+               method: 'DELETE',
+               headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+            });
             setSelectedClip(null);
             // Parent should fetch incidents, but it updates periodically anyway
          } catch (err) {

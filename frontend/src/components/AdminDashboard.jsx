@@ -1,441 +1,680 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { API_BASE } from '../config';
+import DebugPanel from './tabs/DebugPanel';
 import AlertTriangle from 'lucide-react/dist/esm/icons/alert-triangle';
 import Camera from 'lucide-react/dist/esm/icons/camera';
-import ShieldAlert from 'lucide-react/dist/esm/icons/shield-alert';
 import Activity from 'lucide-react/dist/esm/icons/activity';
 import Settings from 'lucide-react/dist/esm/icons/settings';
 import ShieldX from 'lucide-react/dist/esm/icons/shield-x';
 import Cpu from 'lucide-react/dist/esm/icons/cpu';
 import Server from 'lucide-react/dist/esm/icons/server';
 import HardDrive from 'lucide-react/dist/esm/icons/hard-drive';
+import Eye from 'lucide-react/dist/esm/icons/eye';
+import BellOff from 'lucide-react/dist/esm/icons/bell-off';
+import Plus from 'lucide-react/dist/esm/icons/plus';
+import Trash2 from 'lucide-react/dist/esm/icons/trash-2';
+import Edit3 from 'lucide-react/dist/esm/icons/edit-3';
+import Check from 'lucide-react/dist/esm/icons/check';
+import X from 'lucide-react/dist/esm/icons/x';
+import MapPin from 'lucide-react/dist/esm/icons/map-pin';
+import Wifi from 'lucide-react/dist/esm/icons/wifi';
+import WifiOff from 'lucide-react/dist/esm/icons/wifi-off';
+import Bug from 'lucide-react/dist/esm/icons/bug';
 
+// ─── Field Editors ────────────────────────────────────────────────────────────
+function InlineEdit({ value, onSave, type = 'text', placeholder = '', small = false }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+
+  const commit = () => {
+    if (draft !== value) onSave(draft);
+    setEditing(false);
+  };
+
+  if (!editing) {
+    return (
+      <button onClick={() => { setDraft(value); setEditing(true); }}
+        className={`flex items-center gap-1 text-left hover:text-white transition-colors group ${small ? 'text-[10px]' : 'text-xs'} text-slate-300`}>
+        <span className="truncate max-w-[160px]">{value || <span className="text-slate-600 italic">not set</span>}</span>
+        <Edit3 size={9} className="opacity-0 group-hover:opacity-60 shrink-0" />
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1">
+      <input autoFocus type={type} value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false); }}
+        placeholder={placeholder}
+        className={`bg-[#0F172A] border border-[#00F5FF] rounded px-2 py-0.5 text-white focus:outline-none ${small ? 'text-[10px] w-28' : 'text-xs w-40'}`}
+      />
+      <button onClick={commit} className="p-0.5 text-[#00FF9C] hover:text-white"><Check size={12} /></button>
+      <button onClick={() => setEditing(false)} className="p-0.5 text-slate-500 hover:text-white"><X size={12} /></button>
+    </div>
+  );
+}
+
+// ─── Node Card ────────────────────────────────────────────────────────────────
+function NodeCard({ node, onUpdate, onDelete, onSelect, isSelected }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const field = (key, val, label, type = 'text') => (
+    <div className="flex items-center gap-2">
+      <span className="text-[9px] font-bold text-slate-600 uppercase tracking-wider w-10 shrink-0">{label}</span>
+      <InlineEdit value={String(val)} onSave={v => onUpdate(key, v)} type={type} small />
+    </div>
+  );
+
+  return (
+    <div onClick={() => onSelect(node.id)}
+      className={`border rounded-xl p-3 cursor-pointer transition-all ${
+        isSelected
+          ? 'border-[#00F5FF] bg-[#00F5FF]/5'
+          : 'border-slate-800 bg-black/20 hover:border-slate-600'
+      }`}>
+      {/* Header row */}
+      <div className="flex items-start justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full shrink-0 ${node.online ? 'bg-[#00FF9C] shadow-[0_0_6px_#00FF9C]' : 'bg-slate-700'}`} />
+          <div>
+            <InlineEdit value={node.name} onSave={v => onUpdate('name', v)} placeholder="Node name" />
+            <div className="text-[9px] font-mono text-slate-600 mt-0.5">{node.id} · {node.fps?.toFixed(1) ?? 0} fps</div>
+          </div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          {node.online
+            ? <Wifi size={12} className="text-[#00FF9C]" />
+            : <WifiOff size={12} className="text-slate-600" />}
+          {!confirmDelete ? (
+            <button onClick={e => { e.stopPropagation(); setConfirmDelete(true); }}
+              className="p-1 rounded text-slate-600 hover:text-[#FF3B3B] hover:bg-[#FF3B3B]/10 transition-all">
+              <Trash2 size={11} />
+            </button>
+          ) : (
+            <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+              <button onClick={() => onDelete()} className="text-[9px] px-2 py-0.5 bg-[#FF3B3B] text-white rounded font-bold">DELETE</button>
+              <button onClick={() => setConfirmDelete(false)} className="text-[9px] px-2 py-0.5 bg-slate-800 text-slate-400 rounded">Cancel</button>
+            </div>
+          )}
+        </div>
+      </div>
+      {/* Fields */}
+      <div className="flex flex-col gap-1.5 mt-1">
+        {field('stream_url', node.stream_url || '', 'URL')}
+        <div className="flex gap-3">
+          {field('lat', node.lat ?? 0, 'LAT', 'number')}
+          {field('lng', node.lng ?? 0, 'LNG', 'number')}
+        </div>
+      </div>
+      {/* Status badges */}
+      <div className="flex gap-1.5 mt-2 flex-wrap">
+        <span className={`text-[8px] px-1.5 py-0.5 rounded font-bold ${node.online ? 'bg-[#00FF9C]/10 text-[#00FF9C]' : 'bg-slate-800 text-slate-500'}`}>
+          {node.online ? 'ONLINE' : 'OFFLINE'}
+        </span>
+        {node.has_permanent_bg && (
+          <span className="text-[8px] px-1.5 py-0.5 rounded font-bold bg-blue-500/10 text-blue-400">CANNY-BG</span>
+        )}
+        <span className="text-[8px] px-1.5 py-0.5 rounded font-bold bg-slate-800 text-slate-500">
+          {node.clips_saved ?? 0} clips
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Add Node Form ────────────────────────────────────────────────────────────
+function AddNodeForm({ onAdd, onCancel }) {
+  const [form, setForm] = useState({ id: '', name: '', stream_url: '', lat: '', lng: '' });
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const valid = form.id.trim() && form.stream_url.trim();
+
+  return (
+    <div className="border border-[#00F5FF]/30 bg-[#00F5FF]/5 rounded-xl p-4 flex flex-col gap-3">
+      <div className="text-xs font-bold text-[#00F5FF] uppercase tracking-widest">Add New Node</div>
+      {[
+        { k: 'id', label: 'Node ID', ph: 'HASH-3', req: true },
+        { k: 'name', label: 'Name', ph: 'Alpha Post', req: false },
+        { k: 'stream_url', label: 'Stream URL', ph: 'http://192.168.x.x/stream', req: true },
+        { k: 'lat', label: 'Latitude', ph: '24.165566', req: false },
+        { k: 'lng', label: 'Longitude', ph: '94.259984', req: false },
+      ].map(({ k, label, ph, req }) => (
+        <div key={k}>
+          <label className="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+            {label}{req && <span className="text-[#FF3B3B] ml-1">*</span>}
+          </label>
+          <input value={form[k]} onChange={e => set(k, e.target.value)} placeholder={ph}
+            className="w-full bg-[#0F172A] border border-slate-700 rounded p-2 text-white text-xs focus:border-[#00F5FF] focus:outline-none font-mono placeholder:text-slate-700"
+          />
+        </div>
+      ))}
+      <div className="flex gap-2 mt-1">
+        <button onClick={() => onAdd(form)} disabled={!valid}
+          className="flex-1 bg-[#00F5FF]/10 hover:bg-[#00F5FF]/20 border border-[#00F5FF]/50 text-[#00F5FF] font-bold py-2 rounded text-xs disabled:opacity-30">
+          ADD NODE
+        </button>
+        <button onClick={onCancel} className="px-4 bg-slate-800 text-slate-400 rounded text-xs hover:bg-slate-700">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main AdminDashboard ───────────────────────────────────────────────────────
 export default function AdminDashboard() {
+  const [token] = useState('disabled');
   const [nodes, setNodes] = useState([]);
   const [selectedNode, setSelectedNode] = useState('');
   const [activeThreats, setActiveThreats] = useState({});
   const [message, setMessage] = useState('');
+  const [messageType, setMessageType] = useState('info');
   const [loading, setLoading] = useState(false);
   const [telemetry, setTelemetry] = useState(null);
-  
-  // Node config state
+  const [vizMode, setVizMode] = useState('COMBINED');
+  const [fpResult, setFpResult] = useState(null);
+  const [showAddNode, setShowAddNode] = useState(false);
   const [nodeConfig, setNodeConfig] = useState({
-    person_conf: 0.35,
-    canny_low: 50,
-    canny_high: 150,
-    clip_retention_days: 7
+    person_conf: 0.05, prong_b_weight: 1.0,
+    canny_low: 50, canny_high: 150,
+    prong_a_threshold: 20, prong_a_weight: 1.0,
+    intersection_iou: 0.10, intersection_containment: 0.20,
+    min_contour_area: 50, clip_retention_days: 7,
+    fp_count: 0, prong_a_fp_score: 0.0, prong_b_fp_score: 0.0,
   });
-
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [adminTab, setAdminTab] = useState('CONTROL'); // 'CONTROL' | 'DEBUG'
 
-  // Poll for telemetry and threats
+  const authHdr = { 'Authorization': token ? `Bearer ${token}` : '', 'Content-Type': 'application/json' };
+
+  // ── Polling ─────────────────────────────────────────────────────────────────
+  const refreshNodes = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/nodes`);
+      if (!res.ok) return;
+      setNodes(await res.json());
+    } catch (e) {}
+  };
+
   useEffect(() => {
+    refreshNodes();
     const fetchTelemetry = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/admin/telemetry`);
-        const data = await res.json();
-        setTelemetry(data);
-        
-        // Update nodes list if it changed
-        const liveNodes = Object.keys(data.nodes || {}).map(id => ({
-          id, name: id, ...data.nodes[id]
-        }));
-        setNodes(liveNodes);
-        
-        if (!selectedNode && liveNodes.length > 0) {
-          setSelectedNode(liveNodes[0].id);
-        }
-      } catch (e) {
-        console.error("Telemetry fetch failed", e);
-      }
+        const res = await fetch(`${API_BASE}/api/admin/telemetry`, { headers: authHdr });
+        if (!res.ok) return;
+        setTelemetry(await res.json());
+      } catch (e) {}
     };
-
     const fetchAnalysis = async () => {
       try {
         const res = await fetch(`${API_BASE}/api/analyze/all`);
         const data = await res.json();
-        const currentThreats = {};
-        (data.jobs || []).forEach(job => {
-            if (job.status === 'COMPLETE' && job.threat_detected) {
-                currentThreats[job.node_id] = true;
-            } else if (job.status === 'ANALYZING') {
-                currentThreats[job.node_id] = 'analyzing';
-            }
+        const threats = {};
+        (data.jobs || []).forEach(j => {
+          if (j.status === 'COMPLETE' && j.threat_detected) threats[j.node_id] = true;
+          else if (j.status === 'ANALYZING') threats[j.node_id] = 'analyzing';
         });
-        setActiveThreats(currentThreats);
-      } catch (e) { }
+        setActiveThreats(threats);
+      } catch (e) {}
     };
+    fetchTelemetry(); fetchAnalysis();
+    const t1 = setInterval(refreshNodes, 5000);
+    const t2 = setInterval(fetchTelemetry, 2000);
+    const t3 = setInterval(fetchAnalysis, 1000);
+    return () => { clearInterval(t1); clearInterval(t2); clearInterval(t3); };
+  }, []);
 
-    fetchTelemetry();
-    fetchAnalysis();
-    
-    const t1 = setInterval(fetchTelemetry, 2000);
-    const t2 = setInterval(fetchAnalysis, 1000);
-    return () => { clearInterval(t1); clearInterval(t2); };
-  }, [selectedNode]);
-
-  // Load config when node changes
+  // ── Load config when node selected ──────────────────────────────────────────
   useEffect(() => {
     if (!selectedNode) return;
-    const fetchConfig = async () => {
+    const load = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/admin/node_config/${selectedNode}`);
-        const data = await res.json();
-        setNodeConfig(data);
+        const res = await fetch(`${API_BASE}/api/admin/node_config/${selectedNode}`, { headers: authHdr });
+        if (!res.ok) return;
+        setNodeConfig(await res.json());
         setHasUnsavedChanges(false);
-      } catch (e) {
-        console.error("Failed to load node config", e);
-      }
+        setFpResult(null);
+        // Sync viz mode from node info
+        const nodeInfo = nodes.find(n => n.id === selectedNode);
+        if (nodeInfo?.viz_mode) setVizMode(nodeInfo.viz_mode);
+      } catch (e) {}
     };
-    fetchConfig();
+    load();
   }, [selectedNode]);
 
-  const showMessage = (msg) => {
-    setMessage(msg);
-    setTimeout(() => setMessage(''), 3000);
+  const showMsg = (msg, type = 'info') => {
+    setMessage(msg); setMessageType(type);
+    setTimeout(() => setMessage(''), 5000);
   };
 
-  const handleSimulateThreat = async () => {
-    if (!selectedNode) return;
-    setLoading(true);
+  // ── Node CRUD ────────────────────────────────────────────────────────────────
+  const handleUpdateNodeField = async (node_id, key, value) => {
     try {
-      const res = await fetch(`${API_BASE}/api/admin/simulate_threat/${selectedNode}`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/nodes/${node_id}`, {
+        method: 'PATCH', headers: authHdr,
+        body: JSON.stringify({ [key]: value })
+      });
       const data = await res.json();
-      showMessage(data.message);
-    } catch (e) { showMessage('Error triggering threat'); }
+      if (data.error) { showMsg(`Error: ${data.error}`, 'warn'); return; }
+      showMsg(`${node_id}: ${key} updated`, 'ok');
+      await refreshNodes();
+    } catch (e) { showMsg('Update failed', 'warn'); }
+  };
+
+  const handleDeleteNode = async (node_id) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/nodes/${node_id}`, { method: 'DELETE', headers: authHdr });
+      const data = await res.json();
+      showMsg(data.message || 'Node deleted', 'ok');
+      if (selectedNode === node_id) setSelectedNode('');
+      await refreshNodes();
+    } catch (e) { showMsg('Delete failed', 'warn'); }
+  };
+
+  const handleAddNode = async (form) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/nodes/add`, {
+        method: 'POST', headers: authHdr,
+        body: JSON.stringify({
+          id: form.id.trim(),
+          stream_url: form.stream_url.trim(),
+          name: form.name.trim() || form.id.trim(),
+          lat: parseFloat(form.lat) || 0,
+          lng: parseFloat(form.lng) || 0,
+        })
+      });
+      const data = await res.json();
+      if (data.error) { showMsg(`Error: ${data.error}`, 'warn'); return; }
+      showMsg(`Node ${form.id} added`, 'ok');
+      setShowAddNode(false);
+      await refreshNodes();
+    } catch (e) { showMsg('Add failed', 'warn'); }
+  };
+
+  // ── Admin actions ─────────────────────────────────────────────────────────
+  const post = async (url, body = null) => {
+    const res = await fetch(`${API_BASE}${url}`, {
+      method: 'POST', headers: authHdr,
+      body: body ? JSON.stringify(body) : undefined
+    });
+    return res.json();
+  };
+
+  const handleSetVizMode = async (mode) => {
+    if (!selectedNode) return;
+    setVizMode(mode);
+    await post(`/api/admin/set_viz_mode/${selectedNode}`, { mode });
+    showMsg(`Viz → ${mode}`, 'ok');
+  };
+
+  const handleFalsePositive = async () => {
+    if (!selectedNode) return; setLoading(true); setFpResult(null);
+    try {
+      const data = await post(`/api/admin/false_positive/${selectedNode}`);
+      setFpResult(data);
+      showMsg(`FP logged — ${data.blame} blamed`, 'warn');
+      const cfgRes = await fetch(`${API_BASE}/api/admin/node_config/${selectedNode}`, { headers: authHdr });
+      if (cfgRes.ok) setNodeConfig(await cfgRes.json());
+    } catch (e) { showMsg('Error reporting FP', 'warn'); }
+    setLoading(false);
+  };
+
+  const handleAcknowledge = async () => {
+    if (!selectedNode) return; setLoading(true);
+    try { const d = await post(`/api/admin/acknowledge/${selectedNode}`); showMsg(d.message, 'ok'); }
+    catch (e) { showMsg('Error', 'warn'); }
     setLoading(false);
   };
 
   const handleSetBackground = async () => {
-    if (!selectedNode) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/admin/set_background/${selectedNode}`, { method: 'POST' });
-      const data = await res.json();
-      showMessage(data.message);
-    } catch (e) { showMessage('Error setting background'); }
+    if (!selectedNode) return; setLoading(true);
+    try { const d = await post(`/api/admin/set_background/${selectedNode}`); showMsg(d.message, 'ok'); }
+    catch (e) { showMsg('Error', 'warn'); }
     setLoading(false);
   };
 
   const handleClearBackground = async () => {
-    if (!selectedNode) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/admin/clear_bg/${selectedNode}`, { method: 'POST' });
-      const data = await res.json();
-      showMessage(data.message);
-    } catch (e) { showMessage('Error clearing background'); }
+    if (!selectedNode) return; setLoading(true);
+    try { const d = await post(`/api/admin/clear_bg/${selectedNode}`); showMsg(d.message, 'info'); }
+    catch (e) { showMsg('Error', 'warn'); }
     setLoading(false);
   };
 
-  const saveConfig = async (newConfig = nodeConfig) => {
-    if (!selectedNode) return;
-    setLoading(true);
+  const handleSimulateThreat = async () => {
+    if (!selectedNode) return; setLoading(true);
+    try { const d = await post(`/api/admin/simulate_threat/${selectedNode}`); showMsg(d.message, 'warn'); }
+    catch (e) { showMsg('Error', 'warn'); }
+    setLoading(false);
+  };
+
+  const saveConfig = async (cfg = nodeConfig) => {
+    if (!selectedNode) return; setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/admin/node_config/${selectedNode}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newConfig)
+        method: 'POST', headers: authHdr, body: JSON.stringify(cfg)
       });
       const data = await res.json();
-      setNodeConfig(data.config);
-      setHasUnsavedChanges(false);
-      showMessage('Tuning saved to disk.');
-    } catch (e) { showMessage('Error saving tuning'); }
+      if (data.config) { setNodeConfig(data.config); setHasUnsavedChanges(false); }
+      showMsg('Tuning saved.', 'ok');
+    } catch (e) { showMsg('Error saving', 'warn'); }
     setLoading(false);
   };
 
-  const reportFalsePositive = () => {
-    const newConf = Math.min(0.95, nodeConfig.person_conf + 0.05);
-    const updated = { ...nodeConfig, person_conf: newConf };
-    setNodeConfig(updated);
-    saveConfig(updated);
-    showMessage(`False positive logged. Confidence raised to ${newConf.toFixed(2)}`);
+  const slider = (label, key, min, max, step, color = '#00F5FF', note = '') => (
+    <div key={key}>
+      <div className="flex justify-between text-xs mb-1">
+        <span className="text-slate-400">{label}</span>
+        <span className="font-mono" style={{ color }}>{Number(nodeConfig[key]).toFixed(step < 1 ? 2 : 0)}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={nodeConfig[key]}
+        onChange={e => { setNodeConfig({ ...nodeConfig, [key]: step < 1 ? parseFloat(e.target.value) : parseInt(e.target.value) }); setHasUnsavedChanges(true); }}
+        className="w-full" style={{ accentColor: color }} />
+      {note && <p className="text-[9px] text-slate-600 mt-0.5">{note}</p>}
+    </div>
+  );
+
+  const msgStyle = { info: 'border-slate-600 text-white', warn: 'border-yellow-500/50 text-yellow-400', ok: 'border-[#00FF9C]/50 text-[#00FF9C]' };
+  const vizModes = [
+    { id: 'COMBINED', label: 'INTERSECTION', desc: 'Final validated detections only' },
+    { id: 'PRONG_A', label: 'PRONG A (HEATMAP)', desc: 'Raw structural discrepancy overlay' },
+    { id: 'PRONG_B', label: 'PRONG B (YOLO RAW)', desc: 'All YOLO detections before filtering' },
+  ];
+  const formatUptime = s => {
+    if (!s) return '00:00:00';
+    return `${String(Math.floor(s/3600)).padStart(2,'0')}:${String(Math.floor((s%3600)/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
   };
 
-  const formatUptime = (seconds) => {
-    if (!seconds) return '00:00:00';
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
+  const selectedNodeInfo = nodes.find(n => n.id === selectedNode);
 
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-300 font-sans p-6 flex flex-col">
+    <div className="min-h-screen bg-[#020617] text-slate-300 font-sans p-4 lg:p-6 flex flex-col">
       <header className="flex items-center justify-between border-b border-slate-800 pb-4 mb-6">
         <div className="flex items-center gap-3">
-          <Settings className="text-[#00F5FF] w-8 h-8" />
-          <h1 className="text-2xl font-bold tracking-widest text-white">SYSTEM ADMIN CONSOLE</h1>
+          <Settings className="text-[#00F5FF] w-7 h-7" />
+          <h1 className="text-xl font-bold tracking-widest text-white uppercase">System Admin Console</h1>
         </div>
-        <div className="text-xs tracking-widest text-slate-500 uppercase flex items-center gap-4">
-           {telemetry && (
-              <span className="text-[#00FF9C]">UPTIME: {formatUptime(telemetry.uptime_sec)}</span>
-           )}
-          <span>Hashtag V2 Surveillance</span>
+        <div className="text-xs tracking-widest text-slate-500 flex items-center gap-4">
+          {telemetry && <span className="text-[#00FF9C]">UPTIME: {formatUptime(telemetry.uptime_sec)}</span>}
+          <span className="uppercase">Hashtag V2</span>
         </div>
       </header>
 
-      <div className="max-w-[1600px] mx-auto w-full grid grid-cols-1 lg:grid-cols-4 gap-6">
-        
-        {/* Left Panel: Controls Sidebar */}
-        <div className="bg-[#030B17] border border-slate-800 rounded-xl p-6 flex flex-col gap-6">
-          
-          <div>
-            <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
-              Select Camera Node
-            </label>
-            <select
-              value={selectedNode}
-              onChange={(e) => setSelectedNode(e.target.value)}
-              className="w-full bg-[#0F172A] border border-slate-700 rounded-lg p-3 text-white focus:border-[#00F5FF] focus:outline-none appearance-none font-mono"
-            >
-              <option value="" disabled>-- Select Node --</option>
-              {nodes.map(node => (
-                <option key={node.id} value={node.id}>
-                  {node.id} {activeThreats[node.id] === true ? ' [⚠]' : ''} {node.online ? '' : '(OFFLINE)'}
-                </option>
+      {/* ── Tab bar ── */}
+      <div className="flex gap-1 mb-4 border-b border-slate-800 pb-0">
+        {[
+          { id: 'CONTROL', label: 'Control Panel', Icon: Settings },
+          { id: 'DEBUG',   label: 'Live Debug',    Icon: Bug, accent: '#FF3B3B' },
+        ].map(({ id, label, Icon, accent }) => (
+          <button key={id} onClick={() => setAdminTab(id)}
+            className={`flex items-center gap-2 px-4 py-2 text-xs font-bold uppercase tracking-widest border-b-2 transition-all ${
+              adminTab === id
+                ? 'border-current text-white'
+                : 'border-transparent text-slate-600 hover:text-slate-400'
+            }`}
+            style={adminTab === id && accent ? { borderColor: accent, color: accent } : {}}>
+            <Icon size={12} />{label}
+          </button>
+        ))}
+      </div>
+
+      {adminTab === 'DEBUG' ? (
+        <div className="flex gap-4">
+          {/* Compact node selector for debug mode */}
+          <div className="w-56 shrink-0 bg-[#030B17] border border-slate-800 rounded-xl p-3 h-fit">
+            <div className="text-[9px] font-bold text-slate-600 uppercase tracking-widest mb-2">Select Node</div>
+            <div className="flex flex-col gap-1.5">
+              {nodes.map(n => (
+                <button key={n.id} onClick={() => setSelectedNode(n.id)}
+                  className={`flex items-center gap-2 px-2.5 py-2 rounded-lg text-left transition-all ${
+                    selectedNode === n.id
+                      ? 'bg-[#FF3B3B]/10 border border-[#FF3B3B]/30 text-white'
+                      : 'bg-slate-900/50 border border-transparent text-slate-400 hover:border-slate-700 hover:text-white'
+                  }`}>
+                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${n.online ? 'bg-[#00FF9C]' : 'bg-slate-700'}`} />
+                  <div>
+                    <div className="text-xs font-bold">{n.id}</div>
+                    <div className="text-[9px] text-slate-600 truncate">{n.name}</div>
+                  </div>
+                </button>
               ))}
-            </select>
+              {nodes.length === 0 && <div className="text-slate-700 text-[10px] font-mono">No nodes loaded</div>}
+            </div>
+          </div>
+          <div className="flex-1 min-w-0">
+            <DebugPanel nodeId={selectedNode} nodes={nodes} />
+          </div>
+        </div>
+      ) : (
+      <div className="max-w-[1800px] mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+        {/* ── COL 1: Node Manager (3/12) ── */}
+        <div className="lg:col-span-3 flex flex-col gap-4">
+          <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-xs font-bold text-white uppercase tracking-widest flex items-center gap-2">
+                <MapPin size={13} className="text-[#00F5FF]" /> Field Nodes
+              </h2>
+              <button onClick={() => setShowAddNode(v => !v)}
+                className="flex items-center gap-1 px-2 py-1 text-[9px] font-bold text-[#00F5FF] border border-[#00F5FF]/40 rounded hover:bg-[#00F5FF]/10 transition-all">
+                <Plus size={11} /> ADD
+              </button>
+            </div>
+
+            {showAddNode && (
+              <div className="mb-3">
+                <AddNodeForm onAdd={handleAddNode} onCancel={() => setShowAddNode(false)} />
+              </div>
+            )}
+
+            <div className="flex flex-col gap-3">
+              {nodes.length === 0 && (
+                <div className="text-slate-600 text-xs text-center py-4 font-mono">No nodes loaded yet...</div>
+              )}
+              {nodes.map(node => (
+                <NodeCard key={node.id} node={node}
+                  isSelected={selectedNode === node.id}
+                  onSelect={setSelectedNode}
+                  onUpdate={(key, value) => handleUpdateNodeField(node.id, key, value)}
+                  onDelete={() => handleDeleteNode(node.id)}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* ── COL 2: Video Monitor + Tuning (6/12) ── */}
+        <div className="lg:col-span-6 flex flex-col gap-4">
+
+          {/* Video */}
+          <div className="bg-[#000] border-2 border-slate-800 rounded-xl overflow-hidden relative min-h-[420px] flex items-center justify-center">
+            {selectedNode ? (
+              <>
+                <div className="absolute top-3 right-3 z-10 bg-black/50 backdrop-blur border border-white/10 px-3 py-1.5 rounded flex flex-col items-end pointer-events-none">
+                  <span className="text-white font-black tracking-widest text-sm">{selectedNodeInfo?.name || selectedNode}</span>
+                  <span className="text-[#00F5FF] font-mono text-[10px]">VIZ: {vizMode}</span>
+                  {selectedNodeInfo && (
+                    <span className="text-slate-400 font-mono text-[9px] mt-1">
+                      {selectedNodeInfo.fps?.toFixed(1)} FPS | {selectedNodeInfo.has_permanent_bg ? 'CANNY-BG' : 'MOG2'}
+                    </span>
+                  )}
+                </div>
+                {activeThreats[selectedNode] === true && (
+                  <div className="absolute inset-0 pointer-events-none z-10">
+                    <div className="absolute inset-0 border-4 border-[#FF3B3B] animate-pulse" />
+                    <div className="absolute top-3 left-3 bg-[#FF3B3B] text-white px-3 py-1 font-bold tracking-widest text-xs uppercase animate-pulse">
+                      ⚠ THREAT DETECTED
+                    </div>
+                  </div>
+                )}
+                <img key={selectedNode} src={`${API_BASE}/video_feed/${selectedNode}`}
+                  alt={`Feed ${selectedNode}`} className="w-full h-full object-contain"
+                  onError={e => { e.target.style.display = 'none'; }}
+                  onLoad={e => { e.target.style.display = 'block'; }}
+                />
+              </>
+            ) : (
+              <div className="text-slate-700 font-mono tracking-widest uppercase text-sm">Select a Node</div>
+            )}
           </div>
 
-          <hr className="border-slate-800" />
-
-          {/* PER-NODE TUNING */}
-          <div className="flex flex-col gap-4">
-             <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-[#00F5FF] uppercase tracking-widest">Tuning</h3>
-                {hasUnsavedChanges && <span className="text-[10px] text-yellow-500 animate-pulse font-bold">UNSAVED</span>}
-             </div>
-             
-             <div>
-                <div className="flex justify-between text-xs mb-1">
-                   <span>YOLO Confidence</span>
-                   <span className="text-[#00F5FF] font-mono">{Number(nodeConfig.person_conf).toFixed(2)}</span>
-                </div>
-                <input 
-                  type="range" min="0.05" max="0.80" step="0.05"
-                  value={nodeConfig.person_conf}
-                  onChange={e => { setNodeConfig({...nodeConfig, person_conf: parseFloat(e.target.value)}); setHasUnsavedChanges(true); }}
-                  className="w-full accent-[#00F5FF]"
-                />
-             </div>
-
-             <div>
-                <div className="flex justify-between text-xs mb-1">
-                   <span>Canny Edge Low</span>
-                   <span className="text-slate-400 font-mono">{nodeConfig.canny_low}</span>
-                </div>
-                <input 
-                  type="range" min="10" max="100" step="10"
-                  value={nodeConfig.canny_low}
-                  onChange={e => { setNodeConfig({...nodeConfig, canny_low: parseInt(e.target.value)}); setHasUnsavedChanges(true); }}
-                  className="w-full accent-slate-500"
-                />
-             </div>
-
-             <div>
-                <div className="flex justify-between text-xs mb-1">
-                   <span>Canny Edge High</span>
-                   <span className="text-slate-400 font-mono">{nodeConfig.canny_high}</span>
-                </div>
-                <input 
-                  type="range" min="100" max="300" step="10"
-                  value={nodeConfig.canny_high}
-                  onChange={e => { setNodeConfig({...nodeConfig, canny_high: parseInt(e.target.value)}); setHasUnsavedChanges(true); }}
-                  className="w-full accent-slate-500"
-                />
-             </div>
-
-             <div className="flex gap-2 mt-2">
-                <button 
-                  onClick={() => saveConfig()}
-                  disabled={!hasUnsavedChanges || loading}
-                  className="flex-1 bg-[#00F5FF]/10 hover:bg-[#00F5FF]/20 border border-[#00F5FF]/50 text-[#00F5FF] font-bold py-2 rounded text-xs transition-colors disabled:opacity-30"
-                >
-                  SAVE TO DISK
+          {/* Viz Mode */}
+          <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <Eye size={13} className="text-[#00F5FF]" />
+              <h3 className="text-xs font-bold text-[#00F5FF] uppercase tracking-widest">Detection View</h3>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {vizModes.map(v => (
+                <button key={v.id} onClick={() => handleSetVizMode(v.id)} disabled={!selectedNode}
+                  className={`text-left px-3 py-2 rounded-lg border text-xs font-bold transition-all disabled:opacity-40 ${vizMode === v.id ? 'border-[#00F5FF] bg-[#00F5FF]/10 text-[#00F5FF]' : 'border-slate-700 bg-slate-900/30 text-slate-400 hover:border-slate-500'}`}>
+                  <span className="block">{v.label}</span>
+                  <span className="block text-[9px] font-normal text-slate-500 mt-0.5">{v.desc}</span>
                 </button>
-                <button 
-                  onClick={reportFalsePositive}
-                  disabled={loading}
-                  className="flex-1 flex items-center justify-center gap-1 bg-yellow-500/10 hover:bg-yellow-500/20 border border-yellow-500/50 text-yellow-500 font-bold py-2 rounded text-[10px] transition-colors"
-                  title="Increases confidence by 0.05 to filter noise"
-                >
-                  <ShieldX size={12}/>
-                  FALSE POSITIVE
-                </button>
-             </div>
+              ))}
+            </div>
           </div>
 
-          <hr className="border-slate-800" />
+          {/* Tuning */}
+          <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xs font-bold text-white uppercase tracking-widest">Sensitivity Tuning</h3>
+              {hasUnsavedChanges && <span className="text-[9px] text-yellow-500 animate-pulse font-bold">UNSAVED</span>}
+            </div>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+              <div>
+                <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Prong B — YOLO</div>
+                {slider('Confidence', 'person_conf', 0.01, 0.50, 0.01, '#00F5FF')}
+                {slider('YOLO Weight', 'prong_b_weight', 0.1, 3.0, 0.1, '#00F5FF')}
+              </div>
+              <div>
+                <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Prong A — Structural</div>
+                {slider('Edge Threshold', 'prong_a_threshold', 5, 80, 1, '#94A3B8')}
+                {slider('Prong A Weight', 'prong_a_weight', 0.1, 3.0, 0.1, '#94A3B8')}
+                {slider('Min Blob (px²)', 'min_contour_area', 20, 500, 10, '#94A3B8')}
+              </div>
+              <div>
+                <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Intersection Gate</div>
+                {slider('Min IoU', 'intersection_iou', 0.01, 0.50, 0.01, '#475569')}
+                {slider('Min Containment', 'intersection_containment', 0.05, 0.50, 0.05, '#475569')}
+              </div>
+              <div>
+                <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Canny</div>
+                {slider('Canny Low', 'canny_low', 10, 100, 10, '#64748B')}
+                {slider('Canny High', 'canny_high', 100, 300, 10, '#64748B')}
+              </div>
+            </div>
+            <button onClick={() => saveConfig()} disabled={!hasUnsavedChanges || !selectedNode || loading}
+              className="mt-4 w-full bg-[#00F5FF]/10 hover:bg-[#00F5FF]/20 border border-[#00F5FF]/50 text-[#00F5FF] font-bold py-2 rounded text-xs disabled:opacity-30">
+              SAVE TUNING TO DISK
+            </button>
+          </div>
+        </div>
 
-          {/* ACTIONS */}
-          <div className="flex flex-col gap-3">
-            <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-1">Actions</h3>
-            
-            <button
-              onClick={handleSetBackground}
-              disabled={!selectedNode || loading}
-              className="flex items-center justify-center gap-2 w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-2 px-4 rounded text-sm transition-colors disabled:opacity-50"
-            >
-              <Camera className="w-4 h-4 text-[#00FF9C]" />
-              Capture Background
+        {/* ── COL 3: Actions + Telemetry (3/12) ── */}
+        <div className="lg:col-span-3 flex flex-col gap-4">
+
+          {/* Actions */}
+          <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4 flex flex-col gap-2">
+            <h3 className="text-xs font-bold text-white uppercase tracking-widest mb-2">Actions</h3>
+
+            <button onClick={handleFalsePositive} disabled={!selectedNode || loading}
+              className="flex items-center justify-center gap-2 w-full bg-yellow-500/10 hover:bg-yellow-500/20 border border-yellow-500/40 text-yellow-400 font-bold py-2 px-3 rounded text-xs transition-colors disabled:opacity-50">
+              <ShieldX size={13} /> REPORT FALSE POSITIVE
             </button>
 
-            <button
-              onClick={handleClearBackground}
-              disabled={!selectedNode || loading}
-              className="flex items-center justify-center gap-2 w-full bg-slate-800/50 hover:bg-slate-700 text-slate-400 font-bold py-2 px-4 rounded text-sm transition-colors disabled:opacity-50"
-            >
+            {fpResult && (
+              <div className={`text-[10px] p-2 rounded border font-mono ${fpResult.blame === 'PRONG_B' ? 'border-orange-500/30 bg-orange-500/10 text-orange-300' : fpResult.blame === 'PRONG_A' ? 'border-slate-500/30 bg-slate-500/10 text-slate-300' : 'border-yellow-500/30 bg-yellow-500/10 text-yellow-300'}`}>
+                <div className="font-bold mb-1">⚡ {fpResult.blame} BLAMED</div>
+                <div>{fpResult.action}</div>
+                <div className="text-[9px] mt-1 opacity-70">{fpResult.reason}</div>
+              </div>
+            )}
+
+            {nodeConfig.fp_count > 0 && (
+              <div className="text-[9px] font-mono bg-black/30 border border-slate-800 rounded p-2">
+                <div className="text-slate-400 font-bold mb-1">FP History ({nodeConfig.fp_count})</div>
+                <div className="flex justify-between"><span className="text-orange-400">Prong B score:</span><span>{nodeConfig.prong_b_fp_score.toFixed(1)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-400">Prong A score:</span><span>{nodeConfig.prong_a_fp_score.toFixed(1)}</span></div>
+              </div>
+            )}
+
+            <hr className="border-slate-800 my-1" />
+
+            <button onClick={handleAcknowledge} disabled={!selectedNode || loading}
+              className="flex items-center justify-center gap-2 w-full bg-[#00FF9C]/10 hover:bg-[#00FF9C]/20 border border-[#00FF9C]/40 text-[#00FF9C] font-bold py-2 px-3 rounded text-xs disabled:opacity-50">
+              <BellOff size={13} /> ACKNOWLEDGE ALARM
+            </button>
+
+            <button onClick={handleSetBackground} disabled={!selectedNode || loading}
+              className="flex items-center justify-center gap-2 w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-2 px-3 rounded text-sm disabled:opacity-50">
+              <Camera className="w-4 h-4 text-[#00FF9C]" /> Capture Background
+            </button>
+
+            <button onClick={handleClearBackground} disabled={!selectedNode || loading}
+              className="flex items-center justify-center gap-2 w-full bg-slate-800/50 hover:bg-slate-700 text-slate-400 font-bold py-2 px-3 rounded text-sm disabled:opacity-50">
               Revert to MOG2
             </button>
 
-            <button
-              onClick={handleSimulateThreat}
-              disabled={!selectedNode || loading}
-              className="flex items-center justify-center gap-2 w-full bg-[#FF3B3B]/10 hover:bg-[#FF3B3B]/20 border border-[#FF3B3B]/50 text-[#FF3B3B] font-bold py-2 px-4 rounded text-sm transition-colors mt-2 disabled:opacity-50"
-            >
-              <AlertTriangle className="w-4 h-4" />
-              Simulate Threat
+            <button onClick={handleSimulateThreat} disabled={!selectedNode || loading}
+              className="flex items-center justify-center gap-2 w-full bg-[#FF3B3B]/10 hover:bg-[#FF3B3B]/20 border border-[#FF3B3B]/50 text-[#FF3B3B] font-bold py-2 px-3 rounded text-sm mt-1 disabled:opacity-50">
+              <AlertTriangle className="w-4 h-4" /> Simulate Threat
             </button>
+
+            {message && (
+              <div className={`p-3 bg-slate-800 border text-xs rounded text-center font-mono ${msgStyle[messageType]}`}>
+                {message}
+              </div>
+            )}
           </div>
 
-          {message && (
-            <div className="mt-auto p-3 bg-slate-800 border border-slate-600 text-white text-xs rounded text-center font-mono">
-              {message}
-            </div>
-          )}
-        </div>
-
-        {/* Center Panel: Video Feed Monitor */}
-        <div className="lg:col-span-2 bg-[#000] border-2 border-slate-800 rounded-xl overflow-hidden relative min-h-[500px] flex items-center justify-center">
-          
-          {selectedNode ? (
-            <>
-              {/* Overlays */}
-              <div className="absolute top-4 right-4 z-10 bg-black/50 backdrop-blur border border-white/10 px-3 py-1.5 rounded flex flex-col items-end pointer-events-none">
-                 <span className="text-white font-black tracking-widest text-sm">{selectedNode}</span>
-                 <span className="text-[#00F5FF] font-mono text-[10px]">CONF: {Number(nodeConfig.person_conf).toFixed(2)}</span>
-                 {telemetry?.nodes?.[selectedNode] && (
-                    <span className="text-slate-400 font-mono text-[9px] mt-1">
-                       {telemetry.nodes[selectedNode].fps.toFixed(1)} FPS | BG: {telemetry.nodes[selectedNode].has_permanent_bg ? 'CANNY' : 'MOG2'}
-                    </span>
-                 )}
-              </div>
-
-              {activeThreats[selectedNode] === true && (
-                <div className="absolute inset-0 pointer-events-none z-10">
-                   <div className="absolute inset-0 border-4 border-[#FF3B3B] animate-pulse"></div>
-                   <div className="absolute top-4 left-4 bg-[#FF3B3B] text-white px-3 py-1 font-bold tracking-widest text-xs uppercase animate-pulse">
-                     THREAT DETECTED
-                   </div>
+          {/* System Health */}
+          <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4 flex flex-col gap-4">
+            <h3 className="text-xs font-bold text-white uppercase tracking-widest flex items-center gap-2 border-b border-slate-800 pb-3">
+              <Activity className="text-[#00FF9C] w-4 h-4" /> System Health
+            </h3>
+            {telemetry ? (
+              <>
+                {[
+                  { label: 'CPU', icon: Cpu, val: `${telemetry.cpu_pct?.toFixed(1)}%`, pct: telemetry.cpu_pct, color: telemetry.cpu_pct > 85 ? '#FF3B3B' : '#00F5FF' },
+                  { label: 'RAM', icon: Server, val: `${telemetry.ram_used_gb} / ${telemetry.ram_total_gb} GB`, pct: telemetry.ram_pct, color: telemetry.ram_pct > 85 ? '#FF3B3B' : '#00FF9C' },
+                  { label: 'VRAM', icon: Server, val: `${telemetry.gpu_used_mb} MB`, pct: telemetry.gpu_total_mb > 0 ? telemetry.gpu_used_mb / telemetry.gpu_total_mb * 100 : 0, color: '#a855f7' },
+                ].map(m => (
+                  <div key={m.label}>
+                    <div className="flex justify-between text-xs mb-1 font-mono">
+                      <span className="text-slate-400 flex items-center gap-1"><m.icon size={11} />{m.label}</span>
+                      <span style={{ color: m.color }}>{m.val}</span>
+                    </div>
+                    <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full" style={{ width: `${Math.min(100, m.pct)}%`, backgroundColor: m.color }} />
+                    </div>
+                  </div>
+                ))}
+                <div className="flex justify-between text-xs font-mono">
+                  <span className="flex items-center gap-1 text-slate-400"><HardDrive size={11} />Disk</span>
+                  <span>{telemetry.disk_used_gb} / {(telemetry.disk_free_gb + telemetry.disk_used_gb).toFixed(1)} GB</span>
                 </div>
-              )}
-              {activeThreats[selectedNode] === 'analyzing' && (
-                <div className="absolute top-4 left-4 z-10 bg-[#FFD60A] text-black px-3 py-1 font-bold tracking-widest text-xs uppercase">
-                  ANALYZING BUFFER...
+
+                <hr className="border-slate-800" />
+                <div>
+                  <div className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-2">Clip Retention</div>
+                  <div className="flex gap-2 items-center">
+                    <input type="number" min="1" max="90"
+                      value={nodeConfig.clip_retention_days}
+                      onChange={e => { setNodeConfig({ ...nodeConfig, clip_retention_days: parseInt(e.target.value) }); setHasUnsavedChanges(true); }}
+                      className="w-16 bg-[#0F172A] border border-slate-700 rounded p-1 text-white text-center text-sm focus:border-[#00F5FF] focus:outline-none font-mono"
+                    />
+                    <span className="text-xs text-slate-500">days</span>
+                  </div>
                 </div>
-              )}
-              
-              <img 
-                key={selectedNode}
-                src={`${API_BASE}/video_feed/${selectedNode}`} 
-                alt={`Live feed for ${selectedNode}`}
-                className="w-full h-full object-contain"
-                onError={(e) => { e.target.style.display = 'none'; }}
-                onLoad={(e) => { e.target.style.display = 'block'; }}
-              />
-            </>
-          ) : (
-            <div className="text-slate-600 font-mono tracking-widest uppercase">
-              No Node Selected
-            </div>
-          )}
-
-        </div>
-
-        {/* Right Panel: Telemetry & Health */}
-        <div className="bg-[#030B17] border border-slate-800 rounded-xl p-6 flex flex-col gap-6">
-           <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2 border-b border-slate-800 pb-3">
-              <Activity className="text-[#00FF9C] w-4 h-4"/> System Health
-           </h3>
-
-           {telemetry ? (
-              <div className="flex flex-col gap-5">
-                 
-                 {/* CPU */}
-                 <div>
-                    <div className="flex justify-between text-xs mb-1 font-mono">
-                       <span className="flex items-center gap-1 text-slate-400"><Cpu size={12}/> CPU</span>
-                       <span className={telemetry.cpu_pct > 85 ? 'text-[#FF3B3B]' : 'text-white'}>{telemetry.cpu_pct.toFixed(1)}%</span>
-                    </div>
-                    <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                       <div className={`h-full ${telemetry.cpu_pct > 85 ? 'bg-[#FF3B3B]' : 'bg-[#00F5FF]'}`} style={{width: `${telemetry.cpu_pct}%`}} />
-                    </div>
-                 </div>
-
-                 {/* RAM */}
-                 <div>
-                    <div className="flex justify-between text-xs mb-1 font-mono">
-                       <span className="flex items-center gap-1 text-slate-400"><Server size={12}/> RAM</span>
-                       <span className={telemetry.ram_pct > 85 ? 'text-[#FF3B3B]' : 'text-white'}>{telemetry.ram_used_gb} / {telemetry.ram_total_gb} GB</span>
-                    </div>
-                    <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                       <div className={`h-full ${telemetry.ram_pct > 85 ? 'bg-[#FF3B3B]' : 'bg-[#00FF9C]'}`} style={{width: `${telemetry.ram_pct}%`}} />
-                    </div>
-                 </div>
-
-                 {/* VRAM */}
-                 <div>
-                    <div className="flex justify-between text-xs mb-1 font-mono">
-                       <span className="flex items-center gap-1 text-slate-400"><Server size={12}/> VRAM (GPU)</span>
-                       <span className="text-white">{telemetry.gpu_used_mb} / {telemetry.gpu_total_mb} MB</span>
-                    </div>
-                    <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                       <div className="h-full bg-purple-500" style={{width: `${Math.min(100, (telemetry.gpu_used_mb / Math.max(1, telemetry.gpu_total_mb)) * 100)}%`}} />
-                    </div>
-                    {telemetry.batch_jobs_queued > 0 && (
-                       <div className="text-[9px] text-yellow-500 mt-1 font-mono animate-pulse">
-                          {telemetry.batch_jobs_queued} GPU jobs queued
-                       </div>
-                    )}
-                 </div>
-
-                 {/* DISK */}
-                 <div>
-                    <div className="flex justify-between text-xs mb-1 font-mono">
-                       <span className="flex items-center gap-1 text-slate-400"><HardDrive size={12}/> DISK (Clips)</span>
-                       <span className="text-white">{telemetry.disk_used_gb} / {telemetry.disk_free_gb + telemetry.disk_used_gb} GB</span>
-                    </div>
-                 </div>
-
-                 <hr className="border-slate-800 my-2" />
-
-                 {/* CLIP RETENTION */}
-                 <div>
-                    <div className="flex justify-between items-center mb-2">
-                       <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Clip Retention</span>
-                    </div>
-                    <div className="flex gap-2">
-                       <input 
-                         type="number" 
-                         min="1" max="30"
-                         value={nodeConfig.clip_retention_days}
-                         onChange={e => { setNodeConfig({...nodeConfig, clip_retention_days: parseInt(e.target.value)}); setHasUnsavedChanges(true); }}
-                         className="w-16 bg-[#0F172A] border border-slate-700 rounded p-1 text-white text-center text-sm focus:border-[#00F5FF] focus:outline-none font-mono"
-                       />
-                       <span className="text-xs text-slate-500 self-center">days</span>
-                    </div>
-                    <p className="text-[10px] text-slate-500 mt-1 leading-tight">Clips older than this will be automatically deleted to save disk space.</p>
-                 </div>
-
-              </div>
-           ) : (
-              <div className="text-slate-600 font-mono text-sm">Loading telemetry...</div>
-           )}
+              </>
+            ) : (
+              <div className="text-slate-600 font-mono text-xs">Loading telemetry...</div>
+            )}
+          </div>
         </div>
 
       </div>
+      )} {/* end adminTab ternary */}
     </div>
   );
 }

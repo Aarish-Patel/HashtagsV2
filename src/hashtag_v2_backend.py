@@ -64,7 +64,61 @@ CLIPS_DIR = os.path.join(SRC_DIR, "Clips")
 os.makedirs(CLIPS_DIR, exist_ok=True)
 
 FORENSIC_JOURNAL_PATH = os.path.join(SRC_DIR, "forensic_journal.json")
-NODE_CONFIGS_PATH = os.path.join(SRC_DIR, "node_configs.json")
+NODE_CONFIGS_PATH    = os.path.join(SRC_DIR, "node_configs.json")
+NODES_PATH           = os.path.join(SRC_DIR, "nodes.json")
+BG_FRAMES_DIR        = os.path.join(SRC_DIR, "backgrounds")
+os.makedirs(BG_FRAMES_DIR, exist_ok=True)
+
+
+def _bg_paths(node_id: str):
+    """Return (edges_path, frame_path) for a node's background on disk."""
+    safe = node_id.replace("/", "_").replace("\\", "_")
+    return (
+        os.path.join(BG_FRAMES_DIR, f"{safe}_edges.npy"),
+        os.path.join(BG_FRAMES_DIR, f"{safe}_frame.npy"),
+    )
+
+
+def _save_bg_to_disk(node_id: str, edges, frame_gray):
+    """Persist permanent background arrays to disk."""
+    try:
+        ep, fp = _bg_paths(node_id)
+        np.save(ep, edges)
+        np.save(fp, frame_gray)
+    except Exception as e:
+        print(f"[BG] Failed to save background for {node_id}: {e}")
+
+
+def _load_bg_from_disk(node_id: str):
+    """Load persisted background arrays. Returns (edges, frame_gray) or (None, None)."""
+    try:
+        ep, fp = _bg_paths(node_id)
+        if os.path.exists(ep) and os.path.exists(fp):
+            edges = np.load(ep)
+            frame = np.load(fp)
+            print(f"[BG] Loaded persisted background for {node_id}")
+            return edges, frame
+    except Exception as e:
+        print(f"[BG] Failed to load background for {node_id}: {e}")
+    return None, None
+
+
+def _delete_bg_from_disk(node_id: str):
+    """Remove persisted background files when a background is invalidated/cleared."""
+    try:
+        ep, fp = _bg_paths(node_id)
+        for p in (ep, fp):
+            if os.path.exists(p):
+                os.remove(p)
+    except Exception as e:
+        print(f"[BG] Failed to delete background for {node_id}: {e}")
+
+# Default nodes written to nodes.json on first run.
+# Edit nodes.json to change camera URLs/locations permanently.
+_DEFAULT_NODES = [
+    {"id": "HASH-1", "name": "Tiger Chongjang",  "stream_url": "http://192.168.0.200/stream", "lat": 24.165566, "lng": 94.259984},
+    {"id": "HASH-2", "name": "Pangal Sangjai",   "stream_url": "http://192.168.1.100/stream", "lat": 24.180,    "lng": 94.260},
+]
 
 # Portable model path: reads from env var HASHTAG_MODEL_PATH, falls back to the
 # known local path. Set the env var for deployment on a different machine.
@@ -92,10 +146,30 @@ from dataclasses import dataclass, asdict
 @dataclass
 class NodeConfig:
     """Per-camera tuning parameters, persisted to node_configs.json."""
-    person_conf: float = 0.35
+    # ── YOLO (Prong B) ──────────────────────────────────────────────────
+    person_conf: float = 0.05        # YOLO confidence threshold (kept ultra-low)
+    prong_b_weight: float = 1.0      # Multiplier on YOLO confidence score
+
+    # ── Structural Discrepancy (Prong A) ────────────────────────────────
     canny_low: int = 50
     canny_high: int = 150
-    clip_retention_days: int = 7  # Auto-delete clips older than this
+    prong_a_threshold: int = 20      # Edge-diff pixel threshold (lower = more sensitive)
+    prong_a_weight: float = 1.0      # Multiplier on Prong A blob significance
+    pixel_diff_weight: float = 0.55  # Weight of pixel-level diff vs Canny edge diff (0=edge only, 1=pixel only)
+    pixel_diff_threshold: int = 18   # Raw pixel difference below which a pixel is considered "background"
+
+    # ── Intersection settings ───────────────────────────────────────────
+    intersection_iou: float = 0.10   # Min IoU to validate a YOLO box against a blob
+    intersection_containment: float = 0.20
+    min_contour_area: int = 50       # Min blob pixel area to consider
+
+    # ── Storage ─────────────────────────────────────────────────────────
+    clip_retention_days: int = 7
+
+    # ── False-positive self-correction tracking ─────────────────────────
+    fp_count: int = 0
+    prong_a_fp_score: float = 0.0    # Accumulated blame on Prong A across sessions
+    prong_b_fp_score: float = 0.0    # Accumulated blame on Prong B across sessions
 
 
 def _load_node_configs() -> Dict[str, NodeConfig]:
@@ -117,6 +191,57 @@ def _save_node_configs(configs: Dict[str, "NodeConfig"]):
             json.dump({nid: asdict(cfg) for nid, cfg in configs.items()}, f, indent=2)
     except Exception as e:
         print(f"[CONFIG] Failed to save node_configs.json: {e}")
+
+
+def _load_nodes_from_disk() -> List[Dict]:
+    """Load node definitions from nodes.json. Creates file with defaults if missing."""
+    if os.path.exists(NODES_PATH):
+        try:
+            with open(NODES_PATH) as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[NODES] Failed to load nodes.json: {e} — using defaults")
+    # First run: write defaults
+    _save_nodes_to_disk(_DEFAULT_NODES)
+    return list(_DEFAULT_NODES)
+
+
+def _save_nodes_to_disk(nodes_list: List[Dict]):
+    """Persist node definitions list to nodes.json."""
+    try:
+        with open(NODES_PATH, "w") as f:
+            json.dump(nodes_list, f, indent=2)
+        print(f"[NODES] nodes.json saved ({len(nodes_list)} nodes)")
+    except Exception as e:
+        print(f"[NODES] Failed to save nodes.json: {e}")
+
+
+# ===========================
+# GLOBAL EXCEPTION LOG
+# ===========================
+_EXCEPTION_LOG: deque = deque(maxlen=100)  # ring buffer of {ts, node, type, msg, file, line, tb}
+
+def _log_exception(node_id: str, exc: Exception, context: str = ""):
+    import traceback
+    tb = traceback.format_exc()
+    tb_lines = [l for l in tb.strip().splitlines() if l.strip()]
+    # Find the innermost hashtag_v2 file reference for quick source location
+    src_hint = ""
+    for line in reversed(tb_lines):
+        if 'hashtag_v2' in line or 'api_server' in line or 'detection_engine' in line:
+            src_hint = line.strip()
+            break
+    _EXCEPTION_LOG.append({
+        "ts": time.time(),
+        "ts_str": datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3],
+        "node_id": node_id,
+        "context": context,
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "source_hint": src_hint,
+        "traceback": "\n".join(tb_lines[-8:]),  # last 8 lines of tb
+    })
+
 
 # ===========================
 # AUDIBLE ALERT (Windows)
@@ -473,6 +598,7 @@ class BatchAnalyzer:
                     "threat_score": e.get("threat_score"),
                     "class": e.get("class"),
                     "distance_m": e.get("distance_m"),
+                    "bbox": e.get("bbox"),
                 }
                 for e in entities
             ],
@@ -525,12 +651,26 @@ class CameraNode:
         self._stopped = False
         self.clips_saved = 0
 
+        self.clips_saved = 0
+
         self.temp_mp4_path = os.path.join(CLIPS_DIR, f"temp_{self.node_id}.mp4")
-        self.temp_writer = None
-        self.permanent_bg_edges = None
+        self.frame_buffer = deque(maxlen=75)
+        self.permanent_bg_edges = None   # Canny edge map of captured background (used by detection)
+        self.permanent_bg_frame = None   # Grayscale frame of captured background (used by PRONG_A viz)
 
         # Lighting-change detection: track mean brightness to auto-invalidate bg
         self._bg_capture_mean_brightness: Optional[float] = None
+        self._bg_invalidation_strike: int = 0
+
+        # Auto-load persisted background from disk (survives backend restarts)
+        _edges, _frame = _load_bg_from_disk(self.node_id)
+        if _edges is not None and _frame is not None:
+            self.permanent_bg_edges = _edges
+            self.permanent_bg_frame = _frame
+            # Recompute brightness from the stored frame for the invalidation check
+            self._bg_capture_mean_brightness = float(np.mean(_frame))
+            print(f"[{self.node_id}] Auto-loaded persisted background (brightness={self._bg_capture_mean_brightness:.1f})")
+
         # Approaching-object auto-analysis cooldown (prevents repeated triggers)
         self._last_obj_trigger_time: float = 0.0
         self._OBJ_TRIGGER_COOLDOWN = 30.0  # seconds
@@ -548,11 +688,58 @@ class CameraNode:
 
         self._fps = 0.0
         self._ts_ring = deque(maxlen=30)
+        self.threat_detected_this_session = False
+        self._was_online = False
+        self.last_alarm_time = 0.0
+
+        # Viz mode: 'COMBINED' | 'PRONG_A' | 'PRONG_B'
+        self._viz_mode = 'COMBINED'
+
+        # Last raw Prong A/B data for FP analysis
+        self._last_prong_a_blob_area: int = 0
+        self._last_prong_b_conf: float = 0.0
+
+        # ── Heatmap / PRONG_A viz state ──────────────────────────────────
+        self._last_edge_diff = None               # raw edge diff (Canny) or MOG2 mask
+        self._last_is_canny_diff: bool = False    # True = real Canny structural diff
+        self._bg_invalidation_strike: int = 0     # consecutive frames above brightness threshold
+        _BG_INVALIDATION_THRESHOLD = 0.65         # 65% brightness ratio before invalidating bg
+        _BG_INVALIDATION_STRIKES    = 3           # must exceed threshold for N frames in a row
+
+        # ── Multi-threat tracking ────────────────────────────────────────
+        self._active_threat_count: int = 0        # unacknowledged threats on this node
+
+        # ── Debug telemetry ──────────────────────────────────────────────
+        self._last_capture_ts: float = 0.0         # when capture loop last got a frame
+        self._last_inference_ts: float = 0.0       # when inference loop last completed
+        self._last_inference_ms: float = 0.0       # duration of last inference cycle (ms)
+        self._inference_cycle_count: int = 0       # total cycles completed
+        self._detection_history: deque = deque(maxlen=30)  # ring of per-cycle detection snapshots
+        self._last_exception_info: dict = {}       # last exception in either thread
+        self._last_prong_a_blob_count: int = 0     # how many blobs Prong A produced last cycle
+        self._last_yolo_det_count: int = 0         # raw YOLO detections before intersection
+        self._last_intersection_pass: int = 0      # detections that survived intersection
+        self._had_large_discrepancy: bool = False   # did Prong A find something?
+        self._human_detected_this_session: bool = False
+        self._brightness_delta: float = 0.0        # last measured brightness delta vs bg
+        # ────────────────────────────────────────────────────────────────
 
         self.degrader = OV5647Degrader()
 
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
+
+    def _save_buffer_to_mp4(self, path: str) -> bool:
+        with self._lock:
+            frames = list(self.frame_buffer)
+        if not frames:
+            return False
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(path, fourcc, TARGET_FPS, (TARGET_W, TARGET_H))
+        for f in frames:
+            writer.write(f)
+        writer.release()
+        return True
 
     def start(self):
         self._capture_thread.start()
@@ -562,87 +749,334 @@ class CameraNode:
         mog2 = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
 
         while not self._stopped:
-            frame_to_process = self.get_live_frame()
+            frame_to_process = self.get_raw_frame()
             if frame_to_process is None:
                 time.sleep(0.1)
                 continue
+
+            _cycle_start = time.perf_counter()
 
             try:
                 motion_mask = None
                 cfg = self.system.get_node_config(self.node_id)
 
                 # === AUTO BACKGROUND INVALIDATION ===
-                # If lighting changes drastically (day -> night or vice versa),
-                # the permanent background is no longer valid. Auto-reset to MOG2.
+                # Uses a 3-strike dampener: brightness must exceed threshold for 3
+                # consecutive frames before the background is invalidated. This
+                # prevents a single over-exposed or glitch frame from nuking the bg.
                 if self.permanent_bg_edges is not None and self._bg_capture_mean_brightness is not None:
                     gray_check = cv2.cvtColor(frame_to_process, cv2.COLOR_BGR2GRAY)
                     current_brightness = float(np.mean(gray_check))
-                    brightness_change_ratio = abs(current_brightness - self._bg_capture_mean_brightness) / max(self._bg_capture_mean_brightness, 1.0)
-                    if brightness_change_ratio > 0.40:  # >40% change in mean brightness
-                        print(f"[{self.node_id}] BACKGROUND_INVALIDATED — Major lighting change detected (ratio={brightness_change_ratio:.2f}). Reverting to MOG2.")
-                        self.permanent_bg_edges = None
-                        self._bg_capture_mean_brightness = None
-                        self.system._log_event(
-                            "BACKGROUND_INVALIDATED",
-                            f"{self.node_id}: Lighting changed {brightness_change_ratio*100:.0f}% — bg reset to MOG2. Recapture recommended.",
-                            threat_level=1
-                        )
+                    self._brightness_delta = abs(current_brightness - self._bg_capture_mean_brightness) / max(self._bg_capture_mean_brightness, 1.0)
+                    if self._brightness_delta > 0.65:  # raised from 0.40 → 0.65
+                        self._bg_invalidation_strike = getattr(self, '_bg_invalidation_strike', 0) + 1
+                        if self._bg_invalidation_strike >= 3:
+                            print(f"[{self.node_id}] BACKGROUND_INVALIDATED — Sustained lighting change (ratio={self._brightness_delta:.2f}, {self._bg_invalidation_strike} frames).")
+                            self.permanent_bg_edges = None
+                            self.permanent_bg_frame = None   # MUST clear both
+                            self._bg_capture_mean_brightness = None
+                            self._bg_invalidation_strike = 0
+                            _delete_bg_from_disk(self.node_id)  # remove persisted files
+                            self.system._log_event(
+                                "BACKGROUND_INVALIDATED",
+                                f"{self.node_id}: Lighting changed {self._brightness_delta*100:.0f}% for 3+ frames — bg reset to MOG2.",
+                                threat_level=1
+                            )
+                    else:
+                        self._bg_invalidation_strike = 0  # reset strike counter on good frame
 
-                # If permanent bg edges are set, use edge-based structural difference
-                if hasattr(self, 'permanent_bg_edges') and self.permanent_bg_edges is not None:
+                # === PRONG A: Structural Discrepancy Filter ===
+                #
+                # When a permanent background is captured, we fuse TWO signals:
+                #
+                #   Signal 1 — Canny EDGE diff (original):
+                #     absdiff(Canny(current), Canny(bg))
+                #     Detects structural/shape changes. Robust to gradual lighting
+                #     drift. But misses smooth/featureless objects (dark cloth,
+                #     plain clothing) that create few new edges.
+                #
+                #   Signal 2 — Pixel-level diff (new):
+                #     absdiff(gray_current, gray_bg)
+                #     Detects ANY pixel change — texture, colour, presence.
+                #     Catches what Canny misses. More sensitive to lighting noise
+                #     but that is already handled by the brightness dampener above.
+                #
+                #   Combined mask:
+                #     weighted_diff = pixel_weight * pixel_diff
+                #                   + (1 - pixel_weight) * edge_diff
+                #     Threshold the weighted sum → motion_mask
+                #
+                #   Result: catches smooth AND textured intruders, while requiring
+                #   some structural change contribution keeps FP rate low.
+                #
+                if self.permanent_bg_edges is not None and self.permanent_bg_frame is not None:
+                    gray = cv2.cvtColor(frame_to_process, cv2.COLOR_BGR2GRAY)
+
+                    # ── Signal 1: Canny edge diff ──────────────────────────────────
+                    curr_edges = cv2.Canny(gray, cfg.canny_low, cfg.canny_high)
+                    edge_diff  = cv2.absdiff(curr_edges, self.permanent_bg_edges)
+                    kernel     = np.ones((5, 5), np.uint8)
+                    edge_diff  = cv2.morphologyEx(edge_diff, cv2.MORPH_OPEN, kernel)
+                    edge_diff  = cv2.dilate(edge_diff, kernel, iterations=2)
+                    # Normalise to 0-255 float
+                    edge_norm  = edge_diff.astype(np.float32) / 255.0
+
+                    # ── Signal 2: Pixel-level diff ─────────────────────────────────
+                    # Equalise brightness first so minor camera auto-exposure shifts
+                    # don't dominate the pixel diff signal.
+                    curr_eq   = cv2.equalizeHist(gray)
+                    bg_eq     = cv2.equalizeHist(self.permanent_bg_frame)
+                    pixel_diff = cv2.absdiff(curr_eq, bg_eq).astype(np.float32) / 255.0
+                    # Mild Gaussian blur suppresses per-pixel JPEG compression noise
+                    pixel_diff = cv2.GaussianBlur(pixel_diff, (5, 5), 0)
+
+                    # ── Fuse signals ───────────────────────────────────────────────
+                    w_p = float(cfg.pixel_diff_weight)           # 0.55 default
+                    w_e = 1.0 - w_p                              # 0.45 default
+                    combined = (w_p * pixel_diff + w_e * edge_norm)
+                    combined_uint8 = (combined * 255).astype(np.uint8)
+
+                    # Dilate to connect nearby regions before thresholding
+                    combined_uint8 = cv2.dilate(combined_uint8, kernel, iterations=1)
+
+                    # Threshold using a single unified threshold (scaled to 0-255 combined space)
+                    fused_threshold = int(cfg.pixel_diff_threshold * 1.8)  # ~32 default
+                    _, motion_mask = cv2.threshold(
+                        combined_uint8, fused_threshold, 255, cv2.THRESH_BINARY)
+
+                    # Store for viz and debug
+                    self._last_edge_diff  = edge_diff           # raw edge diff for overlay
+                    self._last_pixel_diff = (pixel_diff * 255).astype(np.uint8)  # raw pixel diff
+                    self._last_fused_diff = combined_uint8       # fused map (used by thermal viz)
+                    self._last_is_canny_diff = True
+
+                elif self.permanent_bg_edges is not None:
+                    # Background edges captured but no raw frame (edge-only fallback)
                     gray = cv2.cvtColor(frame_to_process, cv2.COLOR_BGR2GRAY)
                     curr_edges = cv2.Canny(gray, cfg.canny_low, cfg.canny_high)
+                    edge_diff  = cv2.absdiff(curr_edges, self.permanent_bg_edges)
+                    kernel     = np.ones((5, 5), np.uint8)
+                    edge_diff  = cv2.morphologyEx(edge_diff, cv2.MORPH_OPEN, kernel)
+                    edge_diff  = cv2.dilate(edge_diff, kernel, iterations=2)
+                    _, motion_mask = cv2.threshold(edge_diff, cfg.prong_a_threshold, 255, cv2.THRESH_BINARY)
+                    self._last_edge_diff  = edge_diff
+                    self._last_pixel_diff = None
+                    self._last_fused_diff = edge_diff
+                    self._last_is_canny_diff = True
 
-                    # Absolute difference between permanent edges and current edges
-                    edge_diff = cv2.absdiff(curr_edges, self.permanent_bg_edges)
-
-                    # Clean up noise
-                    kernel = np.ones((5, 5), np.uint8)
-                    edge_diff = cv2.morphologyEx(edge_diff, cv2.MORPH_OPEN, kernel)
-                    edge_diff = cv2.dilate(edge_diff, kernel, iterations=2)
-
-                    _, motion_mask = cv2.threshold(edge_diff, 50, 255, cv2.THRESH_BINARY)
                 else:
-                    # Generate live motion mask to boost sensitivity
+                    # No background captured — fall back to MOG2
                     fg_mask = mog2.apply(frame_to_process)
-                    _, motion_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
+                    _, motion_mask = cv2.threshold(fg_mask, 50, 255, cv2.THRESH_BINARY)
+                    self._last_edge_diff  = fg_mask
+                    self._last_pixel_diff = None
+                    self._last_fused_diff = fg_mask
+                    self._last_is_canny_diff = False
 
-                # Run lightweight detection with per-node confidence override
-                detections = self.engine.detect(
+                # === PRONG B: YOLO scan at per-node ultra-low confidence ===
+                yolo_detections = self.engine.detect(
                     frame_to_process,
                     cam_id=self.node_id,
                     fps=TARGET_FPS,
                     motion_mask=motion_mask,
-                    person_conf_override=cfg.person_conf
+                    person_conf_override=max(0.01, cfg.person_conf * cfg.prong_b_weight)
                 )
+                self._last_prong_b_conf = max((d.confidence for d in yolo_detections), default=0.0)
+                self._last_yolo_det_count = len(yolo_detections)
+
+                from detection_engine import Detection
+                detections = []
+                motion_boxes = []
+
+                # === Build Prong A blobs ===
+                if motion_mask is not None:
+                    contours, _ = cv2.findContours(motion_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    for cnt in contours:
+                        area = cv2.contourArea(cnt)
+                        if area > cfg.min_contour_area * cfg.prong_a_weight:
+                            motion_boxes.append(cv2.boundingRect(cnt))
+                    if len(motion_boxes) > 0:
+                        self._had_large_discrepancy = True
+                        self._last_prong_a_blob_area = int(sum(b[2]*b[3] for b in motion_boxes) / len(motion_boxes))
+                self._last_prong_a_blob_count = len(motion_boxes)
+
+
+                final_detections = []
+
+                motion_clusters = {i: [] for i in range(len(motion_boxes))}
+                
+                def _iou(boxA, boxB):
+                    xA, yA = max(boxA[0], boxB[0]), max(boxA[1], boxB[1])
+                    xB, yB = min(boxA[0]+boxA[2], boxB[0]+boxB[2]), min(boxA[1]+boxA[3], boxB[1]+boxB[3])
+                    inter = max(0, xB - xA) * max(0, yB - yA)
+                    areaA, areaB = boxA[2]*boxA[3], boxB[2]*boxB[3]
+                    return inter / float(areaA + areaB - inter) if areaA + areaB > 0 else 0
+                    
+                def _containment(box_in, box_out):
+                    xA, yA = max(box_in[0], box_out[0]), max(box_in[1], box_out[1])
+                    xB, yB = min(box_in[0]+box_in[2], box_out[0]+box_out[2]), min(box_in[1]+box_in[3], box_out[1]+box_out[3])
+                    inter = max(0, xB - xA) * max(0, yB - yA)
+                    area = box_in[2] * box_in[3]
+                    return inter / float(area) if area > 0 else 0
+
+                for y_det in yolo_detections:
+                    y_box = (y_det.x, y_det.y, y_det.w, y_det.h)
+                    matched_idx = -1
+                    for i, m_box in enumerate(motion_boxes):
+                        if _iou(y_box, m_box) > cfg.intersection_iou or _containment(y_box, m_box) > cfg.intersection_containment or _containment(m_box, y_box) > cfg.intersection_containment:
+                            matched_idx = i
+                            break
+                    if matched_idx != -1:
+                        motion_clusters[matched_idx].append(y_det)
+                        
+                for i, m_box in enumerate(motion_boxes):
+                    matched = motion_clusters[i]
+                    if matched:
+                        min_x = min([m_box[0]] + [d.x for d in matched])
+                        min_y = min([m_box[1]] + [d.y for d in matched])
+                        max_x = max([m_box[0]+m_box[2]] + [d.x+d.w for d in matched])
+                        max_y = max([m_box[1]+m_box[3]] + [d.y+d.h for d in matched])
+                        
+                        best_class = "Person" if any(d.class_name == "Person" for d in matched) else matched[0].class_name
+                        best_conf = max(d.confidence for d in matched)
+                        
+                        if best_class == "Person":
+                            self._human_detected_this_session = True
+                        
+                        pad = 10
+                        x = max(0, min_x - pad)
+                        y = max(0, min_y - pad)
+                        w = min(TARGET_W - x, (max_x - min_x) + pad*2)
+                        h = min(TARGET_H - y, (max_y - min_y) + pad*2)
+                        
+                        final_detections.append(Detection(
+                            x=x, y=y, w=w, h=h,
+                            confidence=best_conf,
+                            class_name=best_class,
+                            source="hybrid",
+                            keypoints=None,
+                            metadata={
+                                "prong_a_blob_area": m_box[2] * m_box[3],
+                                "prong_b_conf": best_conf,
+                            }
+                        ))
+
+                detections = final_detections
+                self._last_intersection_pass = len(final_detections)
+
+                # Record detection history snapshot for debug panel
+                self._detection_history.append({
+                    "ts": time.time(),
+                    "prong_a_blobs": self._last_prong_a_blob_count,
+                    "prong_a_area": self._last_prong_a_blob_area,
+                    "prong_b_dets": self._last_yolo_det_count,
+                    "prong_b_conf": round(self._last_prong_b_conf, 3),
+                    "intersection_pass": self._last_intersection_pass,
+                    "mode": self.permanent_bg_edges is not None,
+                })
+
+                # === Build Viz Frame based on selected mode ===
+                viz_frame = frame_to_process.copy()
+                if self._viz_mode == 'PRONG_A':
+                    if self._last_is_canny_diff and self.permanent_bg_frame is not None:
+                        # ── PIXEL DIFF THERMAL  +  CANNY EDGE OUTLINE OVERLAY ──────────────
+                        #
+                        #  Layer 1 (base):  Pixel-diff thermal map
+                        #    - absdiff(equalised current, equalised bg) → COLORMAP_JET
+                        #    - BLUE  = low pixel change = background
+                        #    - GREEN = moderate change
+                        #    - RED   = large pixel change = intruder present
+                        #
+                        #  Layer 2 (overlay): Canny edge diff lines
+                        #    - absdiff(Canny(current), Canny(bg)) → white lines
+                        #    - Draws the structural outline / silhouette of the new object
+                        #    - Crisp edges on top of the heat give precise shape info
+                        #
+
+                        # \u2500\u2500 Layer 1: Pixel-diff thermal \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+                        gray_curr = cv2.cvtColor(frame_to_process, cv2.COLOR_BGR2GRAY)
+                        curr_eq   = cv2.equalizeHist(gray_curr)
+                        bg_eq     = cv2.equalizeHist(self.permanent_bg_frame)
+                        pix_diff  = cv2.absdiff(curr_eq, bg_eq)
+                        # Amplify: background should be a solid deep blue, not grey-blue
+                        pix_diff  = cv2.convertScaleAbs(pix_diff, alpha=2.4, beta=0)
+                        thermal   = cv2.applyColorMap(pix_diff, cv2.COLORMAP_JET)
+                        viz_frame = thermal  # full thermal as base
+
+                        # \u2500\u2500 Layer 2: Canny edge diff outline \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+                        if self._last_edge_diff is not None:
+                            # Threshold the edge diff to get clean binary edges
+                            _, edge_bin = cv2.threshold(
+                                self._last_edge_diff, 20, 255, cv2.THRESH_BINARY)
+                            # Dilate slightly so thin edge lines are clearly visible
+                            edge_bin = cv2.dilate(
+                                edge_bin, np.ones((2, 2), np.uint8), iterations=1)
+                            # Paint edge pixels bright white on the thermal base
+                            viz_frame[edge_bin > 0] = (255, 255, 255)
+
+                        # \u2500\u2500 Confirmed blob contours (dashed cyan) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+                        if motion_mask is not None:
+                            contours_viz, _ = cv2.findContours(
+                                motion_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            cv2.drawContours(viz_frame, contours_viz, -1, (0, 255, 255), 2)
+
+                        # Labels
+                        cv2.putText(viz_frame, 'PRONG A  |  PIXEL DIFF + CANNY EDGES',
+                                    (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.50,
+                                    (255, 255, 255), 1, cv2.LINE_AA)
+                        cv2.putText(viz_frame, 'BLUE=BG   RED=INTRUDER   WHITE=EDGES   CYAN=BLOB',
+                                    (8, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                                    (200, 200, 200), 1, cv2.LINE_AA)
+
+                    else:
+                        # ── MOG2 FALLBACK (no captured background) ───────────────────────
+                        # Show MOG2 motion mask as a dim thermal look + big warning
+                        if self._last_edge_diff is not None:
+                            thermal_mog = cv2.applyColorMap(self._last_edge_diff, cv2.COLORMAP_JET)
+                            viz_frame = cv2.addWeighted(frame_to_process, 0.55, thermal_mog, 0.45, 0)
+                        # Red warning bar
+                        warn_ov = viz_frame.copy()
+                        cv2.rectangle(warn_ov, (0, 0), (viz_frame.shape[1], 72), (0, 0, 160), -1)
+                        viz_frame = cv2.addWeighted(warn_ov, 0.35, viz_frame, 0.65, 0)
+                        cv2.putText(viz_frame, '! CAPTURE BACKGROUND TO ENABLE THERMAL DIFF',
+                                    (8, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (80, 80, 255), 2, cv2.LINE_AA)
+                        cv2.putText(viz_frame, 'CURRENTLY SHOWING MOG2 MOTION MASK',
+                                    (8, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (150, 150, 255), 1, cv2.LINE_AA)
+
+                elif self._viz_mode == 'PRONG_B':
+                    # Draw raw YOLO detections (before intersection filter)
+                    for det in yolo_detections:
+                        cv2.rectangle(viz_frame, (det.x, det.y), (det.x+det.w, det.y+det.h), (255, 165, 0), 1)
+                        cv2.putText(viz_frame, f'{det.class_name} {det.confidence:.2f}',
+                                    (det.x, det.y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 165, 0), 1)
+                    cv2.putText(viz_frame, 'PRONG B: RAW YOLO', (8, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 1, cv2.LINE_AA)
+                else:
+                    # COMBINED: draw intersection-validated boxes
+                    for det in detections:
+                        x1, y1 = det.x, det.y
+                        x2, y2 = det.x + det.w, det.y + det.h
+                        color = (0, 0, 255) if det.class_name in ["Weapon"] else (0, 255, 255)
+                        cv2.rectangle(viz_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                        cv2.putText(viz_frame, f"{det.class_name} {det.confidence:.2f}",
+                                    (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
 
                 with self._det_lock:
                     self._latest_detections = detections
+                    self._latest_viz_frame = viz_frame
 
-                # === APPROACHING OBJECT — AUTO ANALYSIS TRIGGER ===
-                # Update the real-time tracker for this node. If an unidentified
-                # motion blob is consistently approaching (growing in area), it may
-                # be a human hiding behind an object. Trigger batch analysis.
-                self._rt_tracker.update(detections, fps=TARGET_FPS)
-                triggers = self._rt_tracker.get_analysis_triggers()
-                now = time.time()
-                if triggers and (now - self._last_obj_trigger_time > self._OBJ_TRIGGER_COOLDOWN):
-                    if self.temp_writer is not None:
-                        # Flush the current temp file and trigger analysis on it
-                        self.temp_writer.release()
-                        self.temp_writer = None
-                    import shutil
-                    if os.path.exists(self.temp_mp4_path) and os.path.getsize(self.temp_mp4_path) > 1000:
-                        unique_path = self.temp_mp4_path.replace(".mp4", f"_obj_{int(now)}.mp4")
-                        try:
-                            shutil.copy(self.temp_mp4_path, unique_path)
-                            print(f"[{self.node_id}] APPROACHING OBJECT detected — triggering analysis on {unique_path}")
-                            self.system.trigger_auto_threat(self.node_id, unique_path)
-                            self._last_obj_trigger_time = now
-                        except Exception as e:
-                            print(f"[{self.node_id}] Failed to trigger object analysis: {e}")
+                self._last_inference_ts = time.time()
+                self._last_inference_ms = (time.perf_counter() - _cycle_start) * 1000
+                self._inference_cycle_count += 1
 
             except Exception as e:
+                _log_exception(self.node_id, e, context="inference_loop")
+                self._last_exception_info = {
+                    "ts_str": datetime.datetime.now().strftime("%H:%M:%S"),
+                    "context": "inference_loop",
+                    "type": type(e).__name__,
+                    "message": str(e),
+                }
                 print(f"[{self.node_id}] Inference error: {e}")
                 time.sleep(1.0)
 
@@ -679,30 +1113,20 @@ class CameraNode:
             is_open = True
             if cap is not None:
                 is_open = cap.isOpened()
-            elif isinstance(src, str) and src.startswith("http"):
+            elif isinstance(src, str) and (src.startswith("http") or src.startswith("gst:")):
                 is_open = hasattr(self, '_stream') and self._stream is not None
 
             if not is_open:
                 self.online = False
                 
-                # Check if we should trigger an auto-analysis
-                if self.temp_writer is not None:
-                    self.temp_writer.release()
-                    self.temp_writer = None
-                    
-                    print(f"[DEBUG-CAPTURE] [{self.node_id}] is_open became False. Checking if temp_mp4_path exists and size > 1000...")
-                    if not is_video_file and os.path.exists(self.temp_mp4_path) and os.path.getsize(self.temp_mp4_path) > 1000:
-                        import shutil
-                        unique_path = self.temp_mp4_path.replace(".mp4", f"_{int(time.time())}.mp4")
-                        try:
-                            shutil.move(self.temp_mp4_path, unique_path)
-                            print(f"[{self.node_id}] Stream disconnected cleanly. Triggering analysis on {unique_path}")
-                            self.system.trigger_auto_threat(self.node_id, unique_path)
-                        except Exception as e:
-                            print(f"[{self.node_id}] Failed to move mp4: {e}")
-                            self.system.trigger_auto_threat(self.node_id, self.temp_mp4_path)
-                    else:
-                        print(f"[DEBUG-CAPTURE] [{self.node_id}] Not triggering analysis because conditions not met.")
+                # Check if we should save the live clip
+                if len(self.frame_buffer) > 0 and getattr(self, 'threat_detected_this_session', False):
+                    print(f"[{self.node_id}] Stream disconnected cleanly. Saving live clip.")
+                    self.system.save_live_clip(self.node_id, list(self.frame_buffer), self._latest_detections)
+                with self._lock:
+                    self.frame_buffer.clear()
+                self.threat_detected_this_session = False
+                self._was_online = False
                         
                 print(f"[{self.node_id}] WAITING FOR SIGNAL - {src}")
                 time.sleep(2.0)
@@ -725,15 +1149,30 @@ class CameraNode:
                         print(f"[{self.node_id}] ONLINE - {'VIDEO FILE' if is_video_file else 'CAMERA'}")
                         last_frame_time = time.time()
                 else:
-                    # HTTP stream reconnection is handled by the reader below
-                    try:
-                        import urllib.request
-                        self._stream = urllib.request.urlopen(src, timeout=3.0)
-                        self._bytes = b''
-                        print(f"[{self.node_id}] ONLINE - HTTP MJPEG STREAM")
-                        last_frame_time = time.time()
-                    except Exception as e:
-                        print(f"[{self.node_id}] Stream connect failed: {e}")
+                    # HTTP or GST stream reconnection is handled by the reader below
+                    if isinstance(src, str) and src.startswith("http"):
+                        try:
+                            import urllib.request
+                            self._stream = urllib.request.urlopen(src, timeout=3.0)
+                            self._bytes = b''
+                            print(f"[{self.node_id}] ONLINE - HTTP MJPEG STREAM")
+                            last_frame_time = time.time()
+                        except Exception as e:
+                            print(f"[{self.node_id}] Stream connect failed: {e}")
+                    elif isinstance(src, str) and (src.startswith("gst:") or src.startswith("rawgst:")):
+                        try:
+                            import subprocess
+                            if src.startswith("rawgst:"):
+                                pipeline_str = src[7:].split(":", 2)[2].strip()
+                            else:
+                                pipeline_str = src[4:].strip()
+                            self._gst_process = subprocess.Popen(pipeline_str, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=True, bufsize=1048576)
+                            self._stream = self._gst_process.stdout
+                            self._bytes = b''
+                            print(f"[{self.node_id}] ONLINE - GSTREAMER RAW STREAM")
+                            last_frame_time = time.time()
+                        except Exception as e:
+                            print(f"[{self.node_id}] GStreamer connect failed: {e}")
                 continue
 
             # Check manual timeout for hung stream
@@ -744,41 +1183,102 @@ class CameraNode:
                     try: self._stream.close()
                     except: pass
                     self._stream = None
+                if hasattr(self, '_gst_process') and self._gst_process:
+                    try: self._gst_process.terminate()
+                    except: pass
+                    self._gst_process = None
                 continue
 
-            if not cap and not is_video_file and isinstance(src, str) and src.startswith("http"):
-                # Use robust custom MJPEG reader for HTTP streams
+            if not cap and not is_video_file and isinstance(src, str) and (src.startswith("http") or src.startswith("gst:") or src.startswith("rawgst:")):
+                # Use robust custom reader for HTTP MJPEG / GST streams
                 try:
                     if not hasattr(self, '_stream') or self._stream is None:
-                        import urllib.request
-                        self._stream = urllib.request.urlopen(src, timeout=3.0)
+                        if src.startswith("http"):
+                            import urllib.request
+                            self._stream = urllib.request.urlopen(src, timeout=3.0)
+                            self._is_raw = False
+                        else:
+                            import subprocess
+                            if src.startswith("rawgst:"):
+                                parts = src[7:].split(":", 2)
+                                self._raw_w = int(parts[0])
+                                self._raw_h = int(parts[1])
+                                pipeline_str = parts[2].strip()
+                                self._is_raw = True
+                            else:
+                                pipeline_str = src[4:].strip()
+                                self._is_raw = False
+                                
+                            self._gst_process = subprocess.Popen(pipeline_str, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=True, bufsize=1048576)
+                            self._stream = self._gst_process.stdout
                         self._bytes = b''
                         last_frame_time = time.time()
                     
-                    self._bytes += self._stream.read(4096)
-                    a = self._bytes.find(b'\xff\xd8')
-                    b = self._bytes.find(b'\xff\xd9')
-                    
-                    if a != -1 and b != -1:
-                        jpg = self._bytes[a:b+2]
-                        self._bytes = self._bytes[b+2:]
-                        import numpy as np
-                        raw = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
-                        if raw is not None:
+                    if getattr(self, '_is_raw', False):
+                        frame_sz = self._raw_w * self._raw_h * 3
+                        # Force blocking read to guarantee we pull exactly one frame's worth of bytes
+                        needed = frame_sz - len(self._bytes)
+                        chunk = self._stream.read(min(needed, 65536 * 4))
+                        if not chunk:
+                            ret = False
+                            continue
+                        self._bytes += chunk
+                        
+                        if len(self._bytes) == frame_sz:
+                            import numpy as np
+                            raw = np.frombuffer(self._bytes, dtype=np.uint8).reshape((self._raw_h, self._raw_w, 3))
+                            self._bytes = b''
                             ret = True
                             self.online = True
                             last_frame_time = time.time()
                         else:
-                            ret = False
+                            continue # Need more bytes to complete frame
                     else:
-                        continue # Need more bytes
+                        # Read chunk (non-blocking if possible)
+                        if hasattr(self._stream, 'read1'):
+                            self._bytes += self._stream.read1(65536)
+                        else:
+                            self._bytes += self._stream.read(8192)
+
+                        # Extract all complete frames in the buffer, keep only the latest
+                        last_valid_jpg = None
+                        while True:
+                            a = self._bytes.find(b'\xff\xd8')
+                            if a == -1:
+                                break
+                            b = self._bytes.find(b'\xff\xd9', a + 2)
+                            if b == -1:
+                                # Incomplete frame, discard garbage before 'a' and wait for more data
+                                self._bytes = self._bytes[a:]
+                                break
+                            
+                            # Complete frame found
+                            last_valid_jpg = self._bytes[a:b+2]
+                            self._bytes = self._bytes[b+2:]
+
+                        if last_valid_jpg is not None:
+                            import numpy as np
+                            raw = cv2.imdecode(np.frombuffer(last_valid_jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                            if raw is not None:
+                                ret = True
+                                self.online = True
+                                last_frame_time = time.time()
+                            else:
+                                ret = False
+                        else:
+                            continue # Need more bytes
                         
                 except Exception as e:
+                    _log_exception(self.node_id, e, context="mjpeg_reader")
                     print(f"[{self.node_id}] MJPEG Stream error: {e}")
                     ret = False
                     if hasattr(self, '_stream') and self._stream:
                         self._stream.close()
                         self._stream = None
+                    if hasattr(self, '_gst_process') and self._gst_process:
+                        try: self._gst_process.terminate()
+                        except: pass
+                        self._gst_process = None
             else:
                 try:
                     ret, raw = cap.read()
@@ -789,6 +1289,16 @@ class CameraNode:
                     
             if not ret:
                 self.online = False
+                
+                # --- AUTO RECALIBRATION LOGIC ---
+                if self._was_online:
+                    self._was_online = False
+                    if getattr(self, '_had_large_discrepancy', False) and not getattr(self, '_human_detected_this_session', False):
+                        # A massive structural change happened, but the AI confirmed it was NOT a human.
+                        # (e.g. tree fell, fence built, car parked). We auto-capture this as the new background!
+                        print(f"[{self.node_id}] Auto-calibrating background (Structural Discrepancy + No Human).")
+                        self.system.set_permanent_background(self.node_id)
+                
                 if is_video_file:
                     if cap: cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
@@ -797,7 +1307,19 @@ class CameraNode:
                         cap.release()
                         cap = None
                     continue
-            
+                    
+            if not self._was_online:
+                self._was_online = True
+                self.threat_detected_this_session = True
+                self._had_large_discrepancy = False
+                self._human_detected_this_session = False
+                
+                # Instant Alarm: The moment the PIR connects the stream, we trigger the alarm.
+                from detection_engine import Detection
+                fake_det = Detection(x=0, y=0, w=0, h=0, confidence=1.0, class_name="PIR Trigger", source="system", keypoints=None, metadata={})
+                self.system.trigger_instant_alarm(self.node_id, [fake_det])
+                print(f"[{self.node_id}] STREAM CONNECTED! PIR Instant alarm triggered.")
+
             self.online = True
             
             now = time.time()
@@ -821,34 +1343,41 @@ class CameraNode:
                 frame = raw
                 if frame.shape[:2] != (TARGET_H, TARGET_W):
                     frame = cv2.resize(frame, (TARGET_W, TARGET_H))
-                
-                # Write to temp MP4
-                if self.temp_writer is None:
-                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                    self.temp_writer = cv2.VideoWriter(self.temp_mp4_path, fourcc, TARGET_FPS, (TARGET_W, TARGET_H))
-                self.temp_writer.write(frame)
-                
-                annotated = frame.copy()
-                
-                # Draw the latest bounding boxes asynchronously
-                with self._det_lock:
-                    current_detections = list(self._latest_detections)
-                    
-                for det in current_detections:
-                    x1, y1 = det.x, det.y
-                    x2, y2 = det.x + det.w, det.y + det.h
-                    color = (0, 0, 255) if det.class_name == "Weapon" else (0, 255, 255)
-                    cv2.rectangle(annotated, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-                    cv2.putText(annotated, f"{det.class_name} {det.confidence:.2f}", (int(x1), int(y1)-5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
 
-                cv2.putText(annotated, f"{self.node_id} | LIVE", (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
+                with self._det_lock:
+                    viz_mode = getattr(self, '_viz_mode', 'COMBINED')
+                    dets = getattr(self, '_latest_detections', [])
+                    v = getattr(self, '_latest_viz_frame', None)
+
+                if viz_mode == 'COMBINED':
+                    viz = frame.copy()
+                    for det in dets:
+                        x1, y1 = det.x, det.y
+                        x2, y2 = det.x + det.w, det.y + det.h
+                        color = (0, 0, 255) if det.class_name in ["Weapon"] else (0, 255, 255)
+                        cv2.rectangle(viz, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                        cv2.putText(viz, f"{det.class_name} {det.confidence:.2f}",
+                                    (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+                else:
+                    viz = v.copy() if v is not None else frame.copy()
+
+                cv2.putText(viz, f"{self.node_id} | LIVE", (8, 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
 
                 with self._lock:
-                    self._live_frame = annotated
+                    self.frame_buffer.append(frame.copy())   # buffer stores clean raw frame
+                    self._live_frame = viz                    # stream shows viz overlay
                     self._raw_frame = frame.copy()
-                    
+                    self._last_capture_ts = time.time()
+
             except Exception as e:
+                _log_exception(self.node_id, e, context="capture_loop")
+                self._last_exception_info = {
+                    "ts_str": datetime.datetime.now().strftime("%H:%M:%S"),
+                    "context": "capture_loop",
+                    "type": type(e).__name__,
+                    "message": str(e),
+                }
                 print(f"[{self.node_id}] Exception during processing: {e}")
                 import traceback; traceback.print_exc()
 
@@ -856,6 +1385,9 @@ class CameraNode:
             cap.release()
         if hasattr(self, '_stream') and self._stream is not None:
             self._stream.close()
+        if hasattr(self, '_gst_process') and self._gst_process is not None:
+            try: self._gst_process.terminate()
+            except: pass
         self.online = False
 
     def get_live_frame(self) -> Optional[np.ndarray]:
@@ -871,7 +1403,8 @@ class CameraNode:
         return None
 
     def snapshot_buffer(self):
-        return []
+        with self._lock:
+            return list(self.frame_buffer)
 
     def get_status(self) -> Dict:
         return {
@@ -929,12 +1462,22 @@ class HashtagSystem:
         threading.Thread(target=self._retention_loop, daemon=True).start()
 
     def _setup_nodes(self):
-        defaults = [
-            ("HASH-1", "http://192.168.0.200/stream", "Tiger Chongjan", 24.165566, 94.259984),
-            ("HASH-2", 0, "Pangal Sangjai", 24.180, 94.260),
-        ]
-        for nid, url, name, lat, lng in defaults:
-            self._add_node(nid, url, name=name, lat=lat, lng=lng)
+        """
+        Load nodes from nodes.json (or write defaults on first run).
+        ONLY use HTTP URLs — integer device IDs (webcams) are BLOCKED.
+        """
+        nodes_list = _load_nodes_from_disk()
+        print(f"[NODES] Loading {len(nodes_list)} nodes from nodes.json")
+        for nd in nodes_list:
+            nid = nd.get("id", "")
+            url = nd.get("stream_url", "")
+            if not nid:
+                continue
+            if isinstance(url, int) or (isinstance(url, str) and url.strip().isdigit()):
+                print(f"[{nid}] BLOCKED: Integer device ID is not a valid field camera URL. Skipping.")
+                continue
+            self._add_node(nid, url, name=nd.get("name", nid),
+                           lat=nd.get("lat", 0.0), lng=nd.get("lng", 0.0))
 
     def _add_node(self, node_id: str, stream_url: Any, name="", lat=0.0, lng=0.0) -> CameraNode:
         node = CameraNode(node_id, stream_url, self, self.engine, self.degrader, name=name, lat=lat, lng=lng)
@@ -942,15 +1485,210 @@ class HashtagSystem:
         self.nodes[node_id] = node
         return node
 
+    def _nodes_as_list(self) -> List[Dict]:
+        """Serialise current live nodes to a list suitable for nodes.json."""
+        return [
+            {
+                "id": nid,
+                "name": n.name,
+                "stream_url": n.stream_url,
+                "lat": n.lat,
+                "lng": n.lng,
+            }
+            for nid, n in self.nodes.items()
+        ]
+
     def add_node(self, node_id: str, stream_url: Any, name="", lat=0.0, lng=0.0) -> CameraNode:
+        if isinstance(stream_url, int) or (isinstance(stream_url, str) and stream_url.strip().isdigit()):
+            raise ValueError(f"Integer device IDs are blocked. Provide an HTTP or GST URL.")
         if node_id in self.nodes:
             self.nodes[node_id].stop()
-        return self._add_node(node_id, stream_url, name, lat, lng)
+        node = self._add_node(node_id, stream_url, name, lat, lng)
+        _save_nodes_to_disk(self._nodes_as_list())
+        self._log_event("NODE_ADDED", f"Node {node_id} ({name}) added at {stream_url}")
+        return node
+
+    def update_node(self, node_id: str, **kwargs) -> Dict:
+        """
+        Partially update a node's properties. Handles:
+          - name      → renames Clips/<node_id>/<old_name>/ folder
+          - stream_url→ restarts capture thread pointing at new URL
+          - lat / lng → updates coords (new clips get new location)
+        All changes persist to nodes.json immediately.
+        """
+        if node_id not in self.nodes:
+            return {"error": f"Node {node_id} not found"}
+        node = self.nodes[node_id]
+        changes = []
+
+        if "name" in kwargs and kwargs["name"] != node.name:
+            old_safe = str(node.name).replace(" ", "_").upper()
+            new_name = kwargs["name"]
+            new_safe = str(new_name).replace(" ", "_").upper()
+            old_dir = os.path.join(CLIPS_DIR, node_id, old_safe)
+            new_dir = os.path.join(CLIPS_DIR, node_id, new_safe)
+            if os.path.isdir(old_dir) and not os.path.exists(new_dir):
+                try:
+                    os.rename(old_dir, new_dir)
+                    print(f"[NODES] Renamed clip folder: {old_safe} → {new_safe}")
+                except Exception as e:
+                    print(f"[NODES] Failed to rename clip folder: {e}")
+            node.name = new_name
+            changes.append(f"name: {new_name}")
+
+        if "stream_url" in kwargs and kwargs["stream_url"] != node.stream_url:
+            new_url = kwargs["stream_url"]
+            if isinstance(new_url, int) or (isinstance(new_url, str) and new_url.strip().isdigit()):
+                return {"error": "Integer device IDs are blocked. Provide an HTTP or GST URL."}
+            node.stream_url = new_url
+            # Restart capture with new URL
+            node._stopped = True
+            time.sleep(0.5)
+            node._stopped = False
+            node._capture_thread = threading.Thread(target=node._capture_loop, daemon=True)
+            node._capture_thread.start()
+            changes.append(f"stream_url: {new_url}")
+
+        if "lat" in kwargs:
+            node.lat = float(kwargs["lat"])
+            changes.append(f"lat: {node.lat}")
+        if "lng" in kwargs:
+            node.lng = float(kwargs["lng"])
+            changes.append(f"lng: {node.lng}")
+
+        _save_nodes_to_disk(self._nodes_as_list())
+        msg = f"Node {node_id} updated: {', '.join(changes)}"
+        print(f"[NODES] {msg}")
+        self._log_event("NODE_UPDATED", msg)
+        return {"status": "ok", "node_id": node_id, "changes": changes}
 
     def remove_node(self, node_id: str):
-        if node_id in self.nodes:
-            self.nodes[node_id].stop()
-            del self.nodes[node_id]
+        if node_id not in self.nodes:
+            return
+        node = self.nodes[node_id]
+        node.stop()
+        del self.nodes[node_id]
+
+        # Remove from node_configs and persist
+        with self._config_lock:
+            self._node_configs.pop(node_id, None)
+        _save_node_configs(self._node_configs)
+
+        # Archive clip folder (preserve evidence, but mark as deleted)
+        safe_name = str(node.name).replace(" ", "_").upper()
+        node_dir = os.path.join(CLIPS_DIR, node_id, safe_name)
+        if os.path.isdir(node_dir):
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_dir = node_dir + f"_DELETED_{ts}"
+            try:
+                os.rename(node_dir, archive_dir)
+                print(f"[NODES] Archived clip folder to {archive_dir}")
+            except Exception as e:
+                print(f"[NODES] Failed to archive clip folder: {e}")
+
+        _save_nodes_to_disk(self._nodes_as_list())
+        self._log_event("NODE_REMOVED", f"Node {node_id} removed and archived")
+        print(f"[NODES] Node {node_id} removed")
+
+    def get_all_nodes_info(self) -> List[Dict]:
+        """Return full node info for the /api/nodes endpoint."""
+        result = []
+        for nid, node in self.nodes.items():
+            cfg = self.get_node_config(nid)
+            result.append({
+                "id": nid,
+                "name": node.name,
+                "stream_url": node.stream_url,
+                "lat": node.lat,
+                "lng": node.lng,
+                "online": node.online,
+                "fps": round(node._fps, 1),
+                "clips_saved": node.clips_saved,
+                "has_permanent_bg": node.permanent_bg_edges is not None,
+                "viz_mode": node._viz_mode,
+                "config": asdict(cfg),
+            })
+        return result
+
+    def get_debug_snapshot(self, node_id: str) -> Dict:
+        """
+        Full diagnostic snapshot for the live debug panel.
+        Returns everything an engineer would need to diagnose a pipeline issue:
+          - Thread heartbeats (alive + age since last frame/inference)
+          - Per-cycle Prong A/B metrics
+          - Detection history (last 30 cycles)
+          - Last exception (both threads)
+          - Background health
+          - Per-node config in effect
+        """
+        now = time.time()
+        node = self.nodes.get(node_id)
+        if not node:
+            return {"error": f"Node {node_id} not found"}
+
+        capture_age  = round(now - node._last_capture_ts,  1) if node._last_capture_ts  else None
+        inference_age = round(now - node._last_inference_ts, 1) if node._last_inference_ts else None
+
+        capture_health  = "OK"   if capture_age  is not None and capture_age  < 5  else ("STALE" if capture_age is not None else "NEVER")
+        inference_health = "OK"  if inference_age is not None and inference_age < 5 else ("STALE" if inference_age is not None else "NEVER")
+
+        cfg = self.get_node_config(node_id)
+
+        return {
+            "node_id": node_id,
+            "name": node.name,
+            "ts": now,
+
+            # ── Thread heartbeats ───────────────────────────────────────
+            "threads": {
+                "capture_alive":        node._capture_thread.is_alive() if hasattr(node, '_capture_thread') else False,
+                "inference_alive":      node._inference_thread.is_alive() if hasattr(node, '_inference_thread') else False,
+                "capture_last_frame_age_s":  capture_age,
+                "inference_last_cycle_age_s": inference_age,
+                "capture_health":        capture_health,
+                "inference_health":      inference_health,
+            },
+
+            # ── Live pipeline metrics (last cycle) ──────────────────────
+            "pipeline": {
+                "inference_ms":           round(node._last_inference_ms, 2),
+                "inference_cycles_total": node._inference_cycle_count,
+                "fps":                    round(node._fps, 2),
+                "buffer_depth":           len(node.frame_buffer),
+                "buffer_capacity":        node.frame_buffer.maxlen,
+                "prong_mode":             "CANNY_BG" if node.permanent_bg_edges is not None else "MOG2",
+                "prong_a_blobs":          node._last_prong_a_blob_count,
+                "prong_a_avg_blob_area":  node._last_prong_a_blob_area,
+                "prong_b_yolo_raw":       node._last_yolo_det_count,
+                "prong_b_max_conf":       round(node._last_prong_b_conf, 3),
+                "intersection_passed":    node._last_intersection_pass,
+                "brightness_delta_pct":   round(node._brightness_delta * 100, 1),
+                "bg_capture_brightness":  round(node._bg_capture_mean_brightness, 1) if node._bg_capture_mean_brightness else None,
+            },
+
+            # ── Detection history (last 30 cycles) ─────────────────────
+            "detection_history": list(node._detection_history),
+
+            # ── Last exception ──────────────────────────────────────────
+            "last_exception": node._last_exception_info or None,
+
+            # ── Active node config (in-effect right now) ────────────────
+            "active_config": asdict(cfg),
+
+            # ── Viz mode ────────────────────────────────────────────────
+            "viz_mode": node._viz_mode,
+        }
+
+    def get_exception_log(self, node_id: str = None, limit: int = 50) -> List[Dict]:
+        """
+        Return the global exception ring buffer, optionally filtered by node.
+        Each entry: {ts_str, node_id, context, type, message, source_hint, traceback}
+        """
+        log = list(_EXCEPTION_LOG)
+        if node_id:
+            log = [e for e in log if e.get("node_id") == node_id]
+        return list(reversed(log))[:limit]  # newest first
+
 
     def set_permanent_background(self, node_id: str):
         if node_id in self.nodes:
@@ -959,16 +1697,22 @@ class HashtagSystem:
             if frame is not None:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 node.permanent_bg_edges = cv2.Canny(gray, 50, 150)
-                # Store the brightness at capture time for auto-invalidation check
+                node.permanent_bg_frame = gray.copy()          # store raw gray for thermal diff viz
                 node._bg_capture_mean_brightness = float(np.mean(gray))
-                print(f"[ADMIN] Set permanent background for {node_id} (brightness={node._bg_capture_mean_brightness:.1f})")
+                node._bg_invalidation_strike = 0               # reset strike counter
+                _save_bg_to_disk(node_id, node.permanent_bg_edges, node.permanent_bg_frame)  # persist
+                print(f"[ADMIN] Set permanent background for {node_id} (brightness={node._bg_capture_mean_brightness:.1f}) — saved to disk")
+
 
     def clear_permanent_background(self, node_id: str):
         """Reset a node's permanent background, reverting to MOG2 motion detection."""
         if node_id in self.nodes:
             self.nodes[node_id].permanent_bg_edges = None
+            self.nodes[node_id].permanent_bg_frame = None
             self.nodes[node_id]._bg_capture_mean_brightness = None
-            print(f"[ADMIN] Cleared permanent background for {node_id}")
+            self.nodes[node_id]._bg_invalidation_strike = 0
+            _delete_bg_from_disk(node_id)  # remove persisted files
+            print(f"[ADMIN] Cleared permanent background for {node_id} — disk files removed")
 
     def simulate_threat(self, node_id: str):
         if node_id in self.nodes:
@@ -977,10 +1721,9 @@ class HashtagSystem:
             fake_det = Detection(x=100, y=100, w=200, h=300, confidence=0.99, class_name="Person", source="simulated", keypoints=None, metadata={})
             with self.nodes[node_id]._det_lock:
                 self.nodes[node_id]._latest_detections.append(fake_det)
-            if hasattr(self.nodes[node_id], 'temp_mp4_path') and os.path.exists(self.nodes[node_id].temp_mp4_path):
-                import shutil
-                sim_path = self.nodes[node_id].temp_mp4_path.replace(".mp4", "_simulated.mp4")
-                shutil.copy(self.nodes[node_id].temp_mp4_path, sim_path)
+            
+            sim_path = os.path.join(CLIPS_DIR, f"temp_{node_id}_simulated.mp4")
+            if self.nodes[node_id]._save_buffer_to_mp4(sim_path):
                 self.trigger_auto_threat(node_id, sim_path)
 
     def trigger_auto_threat(self, node_id: str, mp4_path: str):
@@ -1023,13 +1766,234 @@ class HashtagSystem:
         with self._job_lock:
             self._jobs[job_id] = job
 
+        # Increment per-node unacknowledged threat count
+        node = self.nodes.get(node_id)
+        if node:
+            node._active_threat_count += 1
+
         now = time.time()
         if now - self._last_buzzer > BUZZER_COOLDOWN_SEC:
             self._last_buzzer = now
             _play_buzzer(4)
-            
-        self._log_event("INSTANT_ALARM", f"{node_id}: {len(entities)} entities detected instantly", threat_level=4)
 
+        self._log_event("INSTANT_ALARM", f"{node_id}: {len(entities)} entities detected instantly (queue={node._active_threat_count if node else '?'})", threat_level=4)
+
+    def acknowledge_node(self, node_id: str):
+        """Operator has acknowledged one threat on this node.
+        Decrements the active threat count. Only clears the session
+        flag once ALL threats have been acknowledged (count reaches 0).
+        """
+        node = self.nodes.get(node_id)
+        if not node:
+            return
+        node._active_threat_count = max(0, node._active_threat_count - 1)
+        if node._active_threat_count == 0:
+            node.threat_detected_this_session = False
+            node._was_online = False
+            print(f"[ADMIN] All threats acknowledged for {node_id}")
+        else:
+            print(f"[ADMIN] Threat ack for {node_id} — {node._active_threat_count} unacknowledged remaining")
+        self._log_event(
+            "ALARM_ACKNOWLEDGED",
+            f"{node_id}: Threat acknowledged ({node._active_threat_count} remaining)"
+        )
+
+    def get_active_threats(self) -> List[Dict]:
+        """Return all nodes with unacknowledged threats (count > 0), with lat/lng for map fit."""
+        result = []
+        for nid, node in self.nodes.items():
+            if node._active_threat_count > 0:
+                result.append({
+                    "node_id": nid,
+                    "name": node.name,
+                    "lat": node.lat,
+                    "lng": node.lng,
+                    "threat_count": node._active_threat_count,
+                    "replay_url": f"http://localhost:5000/video_feed/{nid}",
+                })
+        return result
+
+    def set_viz_mode(self, node_id: str, mode: str):
+        """Set the visualization mode for a camera node: COMBINED | PRONG_A | PRONG_B."""
+        valid = {'COMBINED', 'PRONG_A', 'PRONG_B'}
+        if node_id in self.nodes and mode in valid:
+            self.nodes[node_id]._viz_mode = mode
+            print(f"[ADMIN] Viz mode set to {mode} for {node_id}")
+
+    def report_false_positive(self, node_id: str) -> Dict:
+        """
+        Smart false-positive correction.
+        Analyzes the last detection's Prong A blob area and Prong B YOLO confidence
+        to determine which prong was more responsible, then adjusts that prong's
+        sensitivity to reduce future false positives from that source.
+        Returns a dict describing what was changed.
+        """
+        node = self.nodes.get(node_id)
+        if not node:
+            return {"error": "Node not found"}
+
+        cfg = self.get_node_config(node_id)
+        blob_area = getattr(node, '_last_prong_a_blob_area', 0)
+        yolo_conf = getattr(node, '_last_prong_b_conf', 0.0)
+
+        cfg.fp_count += 1
+        result = {"node_id": node_id, "fp_count": cfg.fp_count,
+                  "blob_area": blob_area, "yolo_conf": yolo_conf}
+
+        # Determine blame:
+        # - If YOLO conf is LOW (<0.15) but blob area is LARGE (>5000 px²):
+        #     YOLO was the weak link → tighten YOLO (raise person_conf, record B blame)
+        # - If YOLO conf is OK (>=0.15) but blob area is SMALL (<2000 px²):
+        #     Prong A over-triggered on noise → tighten A (raise prong_a_threshold, record A blame)
+        # - Mixed → split the correction proportionally
+
+        LARGE_BLOB = 5000
+        SMALL_BLOB = 2000
+        HIGH_YOLO  = 0.15
+
+        if yolo_conf < HIGH_YOLO and blob_area >= LARGE_BLOB:
+            # Prong B (YOLO) is the problem: blob was clearly there, YOLO triggered at junk confidence
+            delta_b_conf = 0.03
+            cfg.person_conf = min(0.50, cfg.person_conf + delta_b_conf)
+            cfg.prong_b_fp_score += 1.0
+            result.update({"blame": "PRONG_B",
+                           "action": f"YOLO conf raised {cfg.person_conf - delta_b_conf:.2f} → {cfg.person_conf:.2f}",
+                           "reason": "YOLO low confidence triggered on large structural blob"})
+
+        elif yolo_conf >= HIGH_YOLO and blob_area < SMALL_BLOB:
+            # Prong A is the problem: tiny blob triggered, YOLO confirmed it spuriously
+            delta_a_thr = 3
+            cfg.prong_a_threshold = min(80, cfg.prong_a_threshold + delta_a_thr)
+            cfg.prong_a_fp_score += 1.0
+            result.update({"blame": "PRONG_A",
+                           "action": f"Prong A threshold raised {cfg.prong_a_threshold - delta_a_thr} → {cfg.prong_a_threshold}",
+                           "reason": "Small structural discrepancy blob triggered false detection"})
+
+        else:
+            # Both are ambiguous — split correction
+            cfg.person_conf = min(0.50, cfg.person_conf + 0.015)
+            cfg.prong_a_threshold = min(80, cfg.prong_a_threshold + 2)
+            cfg.prong_a_fp_score += 0.5
+            cfg.prong_b_fp_score += 0.5
+            result.update({"blame": "SPLIT",
+                           "action": "Both Prong A threshold (+2) and YOLO conf (+0.015) tightened slightly",
+                           "reason": "Ambiguous false positive — both prongs contributed"})
+
+        _save_node_configs(self._node_configs)
+
+        # Save FP report to the node's directory
+        node_obj = self.nodes.get(node_id)
+        safe_name = str(node_obj.name).replace(" ", "_").upper() if node_obj else node_id
+        node_dir = os.path.join(CLIPS_DIR, node_id, safe_name)
+        os.makedirs(node_dir, exist_ok=True)
+        fp_report_path = os.path.join(node_dir, "false_positive_log.json")
+        fp_log = []
+        if os.path.exists(fp_report_path):
+            try:
+                with open(fp_report_path) as f:
+                    fp_log = json.load(f)
+            except Exception:
+                pass
+        result["timestamp_iso"] = datetime.datetime.now().isoformat()
+        result["geolocation"] = {"lat": node_obj.lat if node_obj else 0, "lng": node_obj.lng if node_obj else 0}
+        fp_log.append(result)
+        try:
+            with open(fp_report_path, "w") as f:
+                json.dump(fp_log, f, indent=2)
+        except Exception:
+            pass
+
+        self._log_event("FALSE_POSITIVE", f"{node_id}: FP #{cfg.fp_count} — {result.get('blame')} blamed", threat_level=0)
+        return result
+
+
+    def save_live_clip(self, node_id: str, frames: List[np.ndarray], detections: List[Any]):
+        """
+        Save a live clip with organized per-node folder structure:
+          Clips/
+            HASH-1/
+              Tiger_Chongjan/
+                2026-06-13_14-30-00_LAT24.16_LNG94.26_INCIDENT_E001.mp4
+                2026-06-13_14-30-00_LAT24.16_LNG94.26_INCIDENT_E001_report.json
+            HASH-2/
+              ...
+        """
+        node = self.nodes.get(node_id)
+        ts_obj = datetime.datetime.now()
+        ts_str = ts_obj.strftime("%Y-%m-%d_%H-%M-%S")
+        lat = node.lat if node else 0.0
+        lng = node.lng if node else 0.0
+        safe_name = str(node.name).replace(" ", "_").upper() if node else node_id
+
+        # Per-node directory: Clips/<node_id>/<node_name>/
+        node_dir = os.path.join(CLIPS_DIR, node_id, safe_name)
+        os.makedirs(node_dir, exist_ok=True)
+
+        incident_id = uuid.uuid4().hex[:8].upper()
+        base_name = f"{ts_str}_LAT{lat:.4f}_LNG{lng:.4f}_INC-{incident_id}"
+        fpath = os.path.join(node_dir, base_name + ".mp4")
+
+        if frames:
+            h, w = frames[0].shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(fpath, fourcc, TARGET_FPS, (w, h))
+            for f in frames:
+                writer.write(f)
+            writer.release()
+
+            # Re-encode to H.264 for browser compatibility
+            import subprocess
+            temp_fpath = fpath + ".temp.mp4"
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", fpath, "-vcodec", "libx264", temp_fpath],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+                )
+                os.replace(temp_fpath, fpath)
+            except Exception:
+                pass
+
+        # Rich metadata JSON sidecar
+        entities = []
+        for i, d in enumerate(detections):
+            entities.append({
+                "id": f"ENT-{i:03d}",
+                "class": d.class_name,
+                "threat_level": 4,
+                "threat_score": 100,
+                "behavior": "LIVE DETECT",
+                "bbox": list(d.bbox),
+                "confidence": d.confidence,
+                "prong_a_blob_area": d.metadata.get("prong_a_blob_area", 0) if hasattr(d, 'metadata') else 0,
+                "prong_b_conf": d.metadata.get("prong_b_conf", 0.0) if hasattr(d, 'metadata') else 0.0,
+            })
+
+        report = {
+            "incident_id": incident_id,
+            "node_id": node_id,
+            "node_name": node.name if node else node_id,
+            "timestamp_iso": ts_obj.isoformat(),
+            "timestamp_unix": ts_obj.timestamp(),
+            "geolocation": {"lat": lat, "lng": lng},
+            "threat_detected": True,
+            "max_threat_level": 4,
+            "entities": entities,
+            "entity_count": len(entities),
+            "clip_url": f"/clips/{node_id}/{safe_name}/{base_name}.mp4",
+            "false_positive_reported": False,
+        }
+
+        sidecar = fpath.replace(".mp4", "_report.json")
+        try:
+            with open(sidecar, "w") as f:
+                json.dump(report, f, indent=2)
+        except Exception:
+            pass
+
+        if node:
+            node.clips_saved += 1
+        self._log_event("CLIP_SAVED", f"{base_name} saved for {node_id} @ {lat:.4f},{lng:.4f}")
+        return fpath
 
     # ============================
     # SPACE TRIGGER — CORE LOGIC
@@ -1042,24 +2006,23 @@ class HashtagSystem:
         """
         job_ids = []
         for nid, node in self.nodes.items():
-            frames = node.snapshot_buffer()
-            if not frames:
-                print(f"[ANALYZE] {nid} | Buffer empty, skipping")
-                continue
-
             job_id = str(uuid.uuid4())
-            job = AnalysisJob(job_id, nid, frames)
+            mp4_path = os.path.join(CLIPS_DIR, f"{job_id}.mp4")
+            if node._save_buffer_to_mp4(mp4_path):
+                job = AnalysisJob(job_id, nid, mp4_path)
 
-            with self._job_lock:
-                self._jobs[job_id] = job
+                with self._job_lock:
+                    self._jobs[job_id] = job
 
-            # Run analysis in background thread
-            threading.Thread(
-                target=self._run_job, args=(job,), daemon=True
-            ).start()
+                # Run analysis in background thread
+                threading.Thread(
+                    target=self._run_job, args=(job,), daemon=True
+                ).start()
 
-            job_ids.append(job_id)
-            print(f"[ANALYZE] {nid} | Job {job_id[:8]} queued | {len(frames)} frames")
+                job_ids.append(job_id)
+                print(f"[ANALYZE] {nid} | Job {job_id[:8]} queued")
+            else:
+                print(f"[ANALYZE] {nid} | Buffer empty, skipping")
 
         self._log_event("SPACE_TRIGGER", f"Analysis triggered on {len(job_ids)} nodes")
         return job_ids
@@ -1196,38 +2159,59 @@ class HashtagSystem:
         }
 
     def _retention_loop(self):
-        """Daemon thread: auto-delete clips older than per-node retention policy."""
+        """Daemon thread: auto-delete clips older than per-node retention policy.
+        Walks the full CLIPS_DIR tree so per-node subdirectories are cleaned up."""
         while True:
             time.sleep(1800)  # Check every 30 minutes
             try:
-                # Use maximum retention across all nodes as the global default
+                now = time.time()
                 with self._config_lock:
-                    max_days = max((cfg.clip_retention_days for cfg in self._node_configs.values()), default=7)
-                cutoff = time.time() - max_days * 86400
+                    node_retentions = {nid: cfg.clip_retention_days for nid, cfg in self._node_configs.items()}
+                default_days = 7
                 deleted = 0
-                for fname in os.listdir(CLIPS_DIR):
-                    fpath = os.path.join(CLIPS_DIR, fname)
-                    if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
-                        try:
-                            os.remove(fpath)
-                            deleted += 1
-                        except Exception:
-                            pass
+                for root, dirs, files in os.walk(CLIPS_DIR):
+                    # Determine which node this directory belongs to
+                    rel_root = os.path.relpath(root, CLIPS_DIR)
+                    parts = rel_root.split(os.sep)
+                    node_id = parts[0] if parts[0] != '.' else None
+                    max_days = node_retentions.get(node_id, default_days) if node_id else default_days
+                    cutoff = now - max_days * 86400
+                    for fname in files:
+                        if not (fname.endswith(".mp4") or fname.endswith("_report.json")):
+                            continue
+                        fpath = os.path.join(root, fname)
+                        if os.path.getmtime(fpath) < cutoff:
+                            try:
+                                os.remove(fpath)
+                                deleted += 1
+                            except Exception:
+                                pass
                 if deleted > 0:
-                    print(f"[RETENTION] Deleted {deleted} clips older than {max_days} days.")
-                    self._log_event("RETENTION_CLEANUP", f"Auto-deleted {deleted} clips older than {max_days} days.")
+                    print(f"[RETENTION] Deleted {deleted} files past retention.")
+                    self._log_event("RETENTION_CLEANUP", f"Auto-deleted {deleted} files past retention policy.")
             except Exception as e:
                 print(f"[RETENTION] Error during cleanup: {e}")
+
 
     def get_events(self, limit: int = 100) -> List[Dict]:
         return list(self._events)[-limit:]
 
     def get_clips(self) -> List[Dict]:
         clips = []
-        for fname in sorted(os.listdir(CLIPS_DIR), reverse=True):
-            if not fname.endswith(".mp4"):
-                continue
-            fpath = os.path.join(CLIPS_DIR, fname)
+        # Walk the full Clips/ tree to find clips in per-node subdirectories
+        all_mp4s = []
+        for root, dirs, files in os.walk(CLIPS_DIR):
+            for fname in files:
+                if fname.endswith(".mp4"):
+                    fpath = os.path.join(root, fname)
+                    # Compute relative path from CLIPS_DIR for URL construction
+                    rel = os.path.relpath(fpath, CLIPS_DIR).replace("\\", "/")
+                    all_mp4s.append((os.path.getmtime(fpath), fpath, rel, fname))
+
+        # Sort newest first
+        all_mp4s.sort(key=lambda x: x[0], reverse=True)
+
+        for _, fpath, rel, fname in all_mp4s[:200]:
             report_path = fpath.replace(".mp4", "_report.json")
             report = {}
             if os.path.exists(report_path):
@@ -1237,12 +2221,17 @@ class HashtagSystem:
                 except Exception:
                     pass
             clips.append({
-                "filename": fname,
+                "filename": rel,          # e.g. "HASH-1/TIGER_CHONGJAN/2026-06-13..."
+                "basename": fname,
                 "size_bytes": os.path.getsize(fpath),
                 "report": report,
-                "url": f"http://localhost:5000/clips/{fname}",
+                "url": f"/clips/{rel}",
+                "node_id": report.get("node_id", ""),
+                "timestamp_iso": report.get("timestamp_iso", ""),
+                "geolocation": report.get("geolocation", {}),
             })
-        return clips[:200]
+        return clips
+
 
     def _log_event(self, event_type: str, description: str, threat_level: int = 0):
         self._events.append({

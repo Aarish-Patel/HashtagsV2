@@ -42,27 +42,10 @@ esp_err_t camera_init(void)
                         TAG, "LDO init failed");
 
     /*
-     * Step 2: Provide master clock (XCLK) to OV5647 sensor.
-     * Without this clock the sensor's I2C slave is dead and
-     * detection will fail silently in esp_video_init().
+     * Step 2: XCLK is provided by the onboard oscillator on the Waveshare Pi adapter.
+     * We do not generate XCLK from ESP32-P4. Pin 40 is reserved for HaLow!
      */
-    ESP_LOGI(TAG, "Starting XCLK: GPIO%d @ %d Hz", BOARD_CAM_XCLK_PIN, BOARD_CAM_XCLK_FREQ);
-    esp_cam_sensor_xclk_handle_t xclk_handle;
-    ESP_RETURN_ON_ERROR(
-        esp_cam_sensor_xclk_allocate(ESP_CAM_SENSOR_XCLK_ESP_CLOCK_ROUTER, &xclk_handle),
-        TAG, "XCLK allocate failed");
-
-    esp_cam_sensor_xclk_config_t xclk_cfg = {
-        .esp_clock_router_cfg = {
-            .xclk_pin = BOARD_CAM_XCLK_PIN,
-            .xclk_freq_hz = BOARD_CAM_XCLK_FREQ,
-        },
-    };
-    ESP_RETURN_ON_ERROR(esp_cam_sensor_xclk_start(xclk_handle, &xclk_cfg),
-                        TAG, "XCLK start failed");
-
-    /* Let sensor PLL lock after clock is applied */
-    vTaskDelay(pdMS_TO_TICKS(20));
+    // vTaskDelay(pdMS_TO_TICKS(20));
 
     /*
      * Step 3: Initialize video subsystem (I2C/SCCB, sensor detect, ISP, codecs).

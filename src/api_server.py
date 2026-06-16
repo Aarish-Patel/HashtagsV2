@@ -20,6 +20,9 @@ import sys
 import json
 import time
 import threading
+import datetime
+import jwt
+from functools import wraps
 from flask import Flask, Response, jsonify, request, send_from_directory, abort
 from flask_cors import CORS
 
@@ -72,6 +75,23 @@ def video_feed(node_id):
             node = sys_obj.nodes.get(node_id)
             if node is None:
                 frame_bytes = _no_signal_frame()
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n")
+                time.sleep(0.2)
+            elif not node.online and getattr(node, 'threat_detected_this_session', False) and len(node.frame_buffer) > 0:
+                # If it's a threat and offline, loop the buffer!
+                frames = list(node.frame_buffer)
+                import numpy as np
+                # Add a blank "looping" frame
+                blank = np.zeros((640, 800, 3), dtype=np.uint8)
+                cv2.putText(blank, "LOOP RESTARTING...", (250, 320), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+                frames.append(blank)
+                
+                for f in frames:
+                    frame_bytes = _encode_frame(f, quality=75)
+                    if frame_bytes:
+                        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n")
+                    time.sleep(1.0 / 5.0)
+                time.sleep(1.0)
             else:
                 frame = node.get_live_frame()
                 if frame is None:
@@ -81,11 +101,11 @@ def video_feed(node_id):
                     if frame_bytes is None:
                         frame_bytes = _no_signal_frame()
 
-            yield (b"--frame\r\n"
-                   b"Content-Type: image/jpeg\r\n\r\n"
-                   + frame_bytes
-                   + b"\r\n")
-            time.sleep(1.0 / 5.0)  # Match 5fps capture rate
+                yield (b"--frame\r\n"
+                       b"Content-Type: image/jpeg\r\n\r\n"
+                       + frame_bytes
+                       + b"\r\n")
+                time.sleep(1.0 / 5.0)  # Match 5fps capture rate
 
     return _mjpeg_response(gen)
 
@@ -127,8 +147,45 @@ def replay_feed(job_id, node_id):
 
 
 # ───────────────────────────────────────────────────────────
-# API ENDPOINTS
+# API ENDPOINTS & RBAC
 # ───────────────────────────────────────────────────────────
+
+JWT_SECRET = os.environ.get("HASHTAG_JWT_SECRET", "hashtag-v2-dev-secret-key")
+
+# Static user database for demonstration
+USERS = {
+    "operator": {"password": "op123", "role": "OPERATOR"},
+    "commander": {"password": "cmd123", "role": "COMMANDER"}
+}
+
+def require_role(required_role):
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.get_json() or {}
+    username = data.get("username", "").lower()
+    password = data.get("password", "")
+    
+    user = USERS.get(username)
+    if not user or user["password"] != password:
+        return jsonify({"error": "Invalid credentials"}), 401
+        
+    token = jwt.encode({
+        "username": username,
+        "role": user["role"],
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+    }, JWT_SECRET, algorithm="HS256")
+    
+    return jsonify({
+        "token": token,
+        "role": user["role"]
+    })
 
 @app.route("/api/analyze/<job_id>/stream")
 def analyze_stream(job_id):
@@ -188,6 +245,54 @@ def api_events():
     sys_obj = get_system()
     return jsonify(sys_obj.get_events(limit))
 
+@app.route("/api/analytics/heatmap")
+def api_heatmap():
+    days = int(request.args.get("days", 30))
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+    
+    heatmap_data = {}
+    journal_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forensic_journal.json")
+    if os.path.exists(journal_path):
+        try:
+            with open(journal_path) as f:
+                journal = json.load(f)
+            
+            for entry in journal:
+                ts = entry.get("timestamp")
+                if ts is not None:
+                    try:
+                        if isinstance(ts, (float, int)):
+                            dt = datetime.datetime.fromtimestamp(ts)
+                        else:
+                            dt = datetime.datetime.fromisoformat(str(ts))
+                        if dt < cutoff:
+                            continue
+                    except Exception:
+                        pass
+                
+                node_id = entry.get("node_id") or entry.get("camera") or "UNKNOWN"
+                if node_id not in heatmap_data:
+                    heatmap_data[node_id] = []
+                    
+                entities = entry.get("entities")
+                if not entities:
+                    entities = [entry]
+                    
+                for e in entities:
+                    bbox = e.get("bbox")
+                    if bbox and len(bbox) == 4:
+                        x, y, w, h = bbox
+                        cx = x + w / 2
+                        cy = y + h / 2
+                        score = e.get("threat_score", 50)
+                        heatmap_data[node_id].append({"x": cx, "y": cy, "value": score})
+                    else:
+                        heatmap_data[node_id].append({"x": 0, "y": 0, "value": e.get("threat_score", 50)})
+        except Exception as e:
+            print(f"[API] Error reading journal for heatmap: {e}")
+            
+    return jsonify(heatmap_data)
+
 
 @app.route("/api/clips")
 def api_clips():
@@ -237,14 +342,21 @@ def api_analyze_all():
 
 @app.route("/clips/<path:filename>")
 def serve_clip(filename):
-    """Serve a saved threat clip file."""
-    safe_fn = os.path.basename(filename)
-    if not os.path.exists(os.path.join(CLIPS_DIR, safe_fn)):
+    """Serve a saved threat clip file — supports nested per-node paths."""
+    # Security: resolve and ensure path stays inside CLIPS_DIR
+    safe_path = os.path.realpath(os.path.join(CLIPS_DIR, filename))
+    clips_real = os.path.realpath(CLIPS_DIR)
+    if not safe_path.startswith(clips_real + os.sep) and safe_path != clips_real:
+        abort(403)
+    if not os.path.exists(safe_path):
         abort(404)
-    return send_from_directory(CLIPS_DIR, safe_fn, mimetype="video/mp4")
+    directory = os.path.dirname(safe_path)
+    fname = os.path.basename(safe_path)
+    return send_from_directory(directory, fname, mimetype="video/mp4")
 
 
 @app.route("/api/incidents/<path:filename>", methods=["DELETE"])
+@require_role("COMMANDER")
 def delete_clip(filename):
     """Delete a single saved threat clip."""
     safe_fn = os.path.basename(filename)
@@ -270,6 +382,7 @@ def delete_clip(filename):
 
 
 @app.route("/api/clips/clear", methods=["DELETE"])
+@require_role("COMMANDER")
 def clear_all_clips():
     """Delete all saved threat clips and reset counters."""
     sys_obj = get_system()
@@ -302,31 +415,66 @@ def open_clips_folder():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/nodes", methods=["GET"])
+def get_nodes():
+    """Return all nodes with full metadata: name, url, lat, lng, online status, fps, config."""
+    sys_obj = get_system()
+    return jsonify(sys_obj.get_all_nodes_info())
+
+
 @app.route("/api/nodes/add", methods=["POST"])
+@require_role("COMMANDER")
 def add_node():
-    data = request.get_json()
-    node_id = data.get("id", "").strip()
-    stream_url = data.get("stream_url", "").strip()
+    data = request.get_json() or {}
+    node_id    = str(data.get("id", "")).strip()
+    stream_url = str(data.get("stream_url", "")).strip()
     name = data.get("name", "")
-    lat = float(data.get("lat", 0.0) or 0.0)
-    lng = float(data.get("lng", 0.0) or 0.0)
-    
+    lat  = float(data.get("lat", 0.0) or 0.0)
+    lng  = float(data.get("lng", 0.0) or 0.0)
+
     if not node_id or not stream_url:
         return jsonify({"error": "id and stream_url required"}), 400
-        
+
     sys_obj = get_system()
-    sys_obj.add_node(node_id, stream_url, name=name, lat=lat, lng=lng)
+    try:
+        sys_obj.add_node(node_id, stream_url, name=name, lat=lat, lng=lng)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     return jsonify({"status": "ok", "node_id": node_id})
 
 
+@app.route("/api/nodes/<node_id>", methods=["PATCH"])
+@require_role("COMMANDER")
+def update_node(node_id):
+    """
+    Partially update a node. Accepts any combination of:
+      name, stream_url, lat, lng
+    Changes are applied live (stream_url restarts capture) and persisted to nodes.json.
+    """
+    data = request.get_json() or {}
+    allowed = {"name", "stream_url", "lat", "lng"}
+    kwargs = {k: v for k, v in data.items() if k in allowed}
+    if not kwargs:
+        return jsonify({"error": "No valid fields provided. Allowed: name, stream_url, lat, lng"}), 400
+
+    sys_obj = get_system()
+    result = sys_obj.update_node(node_id, **kwargs)
+    if "error" in result:
+        return jsonify(result), 404
+    return jsonify(result)
+
+
 @app.route("/api/nodes/<node_id>", methods=["DELETE"])
+@require_role("COMMANDER")
 def remove_node(node_id):
     sys_obj = get_system()
     sys_obj.remove_node(node_id)
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "message": f"Node {node_id} removed and clip folder archived"})
+
 
 
 @app.route("/api/admin/simulate_threat/<node_id>", methods=["POST"])
+@require_role("COMMANDER")
 def admin_simulate_threat(node_id):
     sys_obj = get_system()
     sys_obj.simulate_threat(node_id)
@@ -334,6 +482,7 @@ def admin_simulate_threat(node_id):
 
 
 @app.route("/api/admin/set_background/<node_id>", methods=["POST"])
+@require_role("COMMANDER")
 def admin_set_background(node_id):
     sys_obj = get_system()
     sys_obj.set_permanent_background(node_id)
@@ -341,6 +490,7 @@ def admin_set_background(node_id):
 
 
 @app.route("/api/admin/clear_bg/<node_id>", methods=["POST"])
+@require_role("COMMANDER")
 def admin_clear_background(node_id):
     sys_obj = get_system()
     sys_obj.clear_permanent_background(node_id)
@@ -348,12 +498,14 @@ def admin_clear_background(node_id):
 
 
 @app.route("/api/admin/telemetry", methods=["GET"])
+@require_role("OPERATOR")
 def admin_telemetry():
     sys_obj = get_system()
     return jsonify(sys_obj.get_telemetry())
 
 
 @app.route("/api/admin/node_config/<node_id>", methods=["GET"])
+@require_role("OPERATOR")
 def admin_get_node_config(node_id):
     sys_obj = get_system()
     cfg = sys_obj.get_node_config(node_id)
@@ -362,6 +514,7 @@ def admin_get_node_config(node_id):
 
 
 @app.route("/api/admin/node_config/<node_id>", methods=["POST"])
+@require_role("COMMANDER")
 def admin_set_node_config(node_id):
     data = request.get_json()
     sys_obj = get_system()
@@ -371,11 +524,112 @@ def admin_set_node_config(node_id):
 
 
 @app.route("/api/admin/set_retention/<int:days>", methods=["POST"])
+@require_role("COMMANDER")
 def admin_set_retention(days):
     sys_obj = get_system()
     for nid in sys_obj.nodes.keys():
         sys_obj.set_node_config(nid, clip_retention_days=days)
     return jsonify({"status": "ok", "message": f"Clip retention set to {days} days globally"})
+
+
+@app.route("/api/admin/acknowledge/<node_id>", methods=["POST"])
+@require_role("OPERATOR")
+def admin_acknowledge(node_id):
+    """Operator acknowledges one threat on this node — decrements the active threat count."""
+    sys_obj = get_system()
+    sys_obj.acknowledge_node(node_id)
+    return jsonify({"status": "ok", "message": f"Alarm acknowledged for {node_id}"})
+
+
+@app.route("/api/threats/active", methods=["GET"])
+def get_active_threats():
+    """Return all nodes that currently have unacknowledged threats, with lat/lng for map fit."""
+    sys_obj = get_system()
+    return jsonify(sys_obj.get_active_threats())
+
+
+
+
+@app.route("/api/admin/set_viz_mode/<node_id>", methods=["POST"])
+@require_role("OPERATOR")
+def admin_set_viz_mode(node_id):
+    """Set detection visualization mode: COMBINED | PRONG_A | PRONG_B."""
+    data = request.get_json() or {}
+    mode = data.get("mode", "COMBINED").upper()
+    if mode not in {"COMBINED", "PRONG_A", "PRONG_B"}:
+        return jsonify({"error": "mode must be COMBINED, PRONG_A, or PRONG_B"}), 400
+    sys_obj = get_system()
+    sys_obj.set_viz_mode(node_id, mode)
+    return jsonify({"status": "ok", "mode": mode, "node_id": node_id})
+
+
+@app.route("/api/admin/false_positive/<node_id>", methods=["POST"])
+@require_role("OPERATOR")
+def admin_false_positive(node_id):
+    """
+    Report a false positive on this node.
+    Backend analyses which prong was responsible and auto-tunes sensitivity.
+    """
+    sys_obj = get_system()
+    result = sys_obj.report_false_positive(node_id)
+    return jsonify(result)
+
+
+
+
+
+
+# ───────────────────────────────────────────────────────────
+# DEBUG & DIAGNOSTICS ENDPOINTS
+# ───────────────────────────────────────────────────────────
+
+@app.route("/api/debug/<node_id>", methods=["GET"])
+def debug_node(node_id):
+    """
+    Full live diagnostic snapshot for a single node.
+    Returns: thread health, Prong A/B last-cycle metrics,
+    inference timing, detection history, last exception, active config.
+    """
+    sys_obj = get_system()
+    snap = sys_obj.get_debug_snapshot(node_id)
+    if "error" in snap:
+        return jsonify(snap), 404
+    return jsonify(snap)
+
+
+@app.route("/api/debug/exceptions", methods=["GET"])
+def debug_exceptions():
+    """
+    Global exception ring buffer (last 100 exceptions across all nodes).
+    Query params:
+      ?node_id=HASH-1   filter by node
+      ?limit=20         max results (default 50)
+    """
+    sys_obj = get_system()
+    node_id = request.args.get("node_id")
+    limit   = int(request.args.get("limit", 50))
+    return jsonify(sys_obj.get_exception_log(node_id=node_id, limit=limit))
+
+
+@app.route("/api/debug/pipeline", methods=["GET"])
+def debug_pipeline_all():
+    """
+    Quick health summary for ALL nodes — one row per node.
+    Useful for the admin panel overview without selecting a specific node.
+    """
+    sys_obj = get_system()
+    result = []
+    for nid in sys_obj.nodes:
+        snap = sys_obj.get_debug_snapshot(nid)
+        result.append({
+            "node_id": nid,
+            "name": snap.get("name"),
+            "threads": snap.get("threads"),
+            "pipeline": snap.get("pipeline"),
+            "last_exception": snap.get("last_exception"),
+            "viz_mode": snap.get("viz_mode"),
+        })
+    return jsonify(result)
 
 
 # ───────────────────────────────────────────────────────────

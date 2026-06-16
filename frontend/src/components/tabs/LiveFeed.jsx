@@ -31,9 +31,8 @@ const LiveFeed = ({
   sensors = [],
   entities = [],
   mode = 'STANDBY',
-  replayUrls = {},    // node_id → replay MJPEG URL (shown when mode=THREAT)
-  analysisJobs = [],  // array of analysis jobs
-  onAnalyze,
+  replayUrls = {},
+  analysisJobs = [],
   onDismiss,
 }) => {
   const [viewMode, setViewMode] = useState('FORCE_GRID');
@@ -126,7 +125,6 @@ const LiveFeed = ({
         </div>
 
         <div className="flex items-center gap-2">
-          {/* View toggles */}
           {[
             { id: 'FORCE_GRID', label: 'ALL FEEDS', icon: Grid },
             ...(isThreat ? [{ id: 'REPLAY_ONLY', label: 'THREATS ONLY', icon: AlertTriangle, color: 'text-red-500' }] : []),
@@ -145,25 +143,23 @@ const LiveFeed = ({
             </button>
           ))}
 
-          {/* SPACE trigger button */}
-          {!isThreat && !isAnalyzing && (
-            <button
-              onClick={onAnalyze}
-              className="px-4 py-1.5 rounded-lg text-[9px] font-black tracking-widest border border-[#00F5FF]/40 bg-[#00F5FF]/10 text-[#00F5FF] hover:bg-[#00F5FF]/20 transition-all uppercase flex items-center gap-1.5"
-            >
-              <Shield size={11} />
-              ANALYZE  [SPACE]
-            </button>
-          )}
           {isThreat && (
             <button
-              onClick={onDismiss}
+              onClick={async () => {
+                // Acknowledge all active threat nodes on the backend, then dismiss locally
+                const threatNodes = sensors.filter(s => replayUrls[s.id || s.rawId]);
+                await Promise.all(threatNodes.map(s =>
+                  fetch(`${API_BASE}/api/admin/acknowledge/${s.id || s.rawId}`, { method: 'POST' }).catch(() => {})
+                ));
+                onDismiss && onDismiss();
+              }}
               className="px-4 py-1.5 rounded-lg text-[9px] font-black tracking-widest border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-all uppercase"
             >
-              DISMISS  [SPACE]
+              DISMISS + ACK  [SPACE]
             </button>
           )}
         </div>
+
       </div>
 
       {/* ── VIDEO GRID ── */}
@@ -209,10 +205,11 @@ const LiveFeed = ({
           <Cpu size={11} className="text-[#00F5FF]/50" />
           <span className="text-[8px] font-bold text-slate-600 uppercase tracking-widest">
             {isThreat
-              ? `REPLAYING ANNOTATED CLIP — ${Object.keys(replayUrls).length} FEEDS`
-              : `STANDBY — ML OFFLINE UNTIL SPACE PRESSED`}
+              ? `THREAT ACTIVE — LOOPING UNTIL ACKNOWLEDGED — ${Object.keys(replayUrls).length} FEEDS`
+              : `STANDBY — PIR WAKEUP TRIGGERS INSTANT ALARM`}
           </span>
         </div>
+
         {isThreat && (
           <div className="ml-auto flex items-center gap-2 animate-pulse">
             <div className="w-2 h-2 rounded-full bg-[#FF3B3B]" />

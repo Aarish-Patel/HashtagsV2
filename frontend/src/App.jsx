@@ -50,6 +50,9 @@ function playBrowserBuzzer(threatLevel) {
 }
 
 export default function App() {
+  const [token, setToken] = useState(() => localStorage.getItem('token'));
+  const [role, setRole] = useState(() => localStorage.getItem('role'));
+
   // ── Core state ──────────────────────────────────────────────
   const [activeTab, setActiveTab]       = useState('TACTICAL MAP');
   const [time, setTime]                 = useState('');
@@ -60,38 +63,43 @@ export default function App() {
   const [logs, setLogs]                 = useState([]);
   const [alerts, setAlerts]             = useState([]);
   const [incidents, setIncidents]       = useState([]);
-  const [nodes, setNodes] = useState(() => {
-    const saved = localStorage.getItem('tactical_nodes');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (e) {}
-    }
-    return [
-      { id: 'HASH-1', name: 'Tiger Chongjan', lat: 24.165566, lng: 94.259984, ip: '192.168.0.200' },
-      { id: 'HASH-2', name: 'Pangal Sangjai', lat: 24.180, lng: 94.260, ip: '127.0.0.1' }
-    ];
-  });
+  // ── Nodes — fetched from backend (single source of truth) ─
+  const [nodes, setNodes] = useState([]);
 
-  useEffect(() => {
-    localStorage.setItem('tactical_nodes', JSON.stringify(nodes));
-    // Sync to backend so it connects to the new streams immediately
-    nodes.forEach(n => {
-      if (n.ip) {
-        const stream_url = n.ip.startsWith('http') ? n.ip : `http://${n.ip}/stream`;
-        fetch(`${API_BASE}/api/nodes/add`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: n.id, stream_url, name: n.name, lat: n.lat, lng: n.lng })
-        }).catch(() => {});
-      }
-    });
-  }, [nodes]);
+  const fetchNodes = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/nodes`);
+      if (!res.ok) return;
+      const data = await res.json();
+      // Normalize to the shape the rest of the app uses
+      setNodes(data.map(n => ({
+        id: n.id,
+        name: n.name,
+        lat: n.lat,
+        lng: n.lng,
+        stream_url: n.stream_url,
+        online: n.online,
+        fps: n.fps,
+        clips_saved: n.clips_saved,
+        has_permanent_bg: n.has_permanent_bg,
+        viz_mode: n.viz_mode,
+        config: n.config,
+        // Legacy field aliases for older components
+        ip: n.stream_url,
+      })));
+    } catch (e) { /* backend offline */ }
+  }, []);
 
   // ── Analysis state machine ───────────────────────────────────
   const [mode, setMode]                 = useState(MODE.STANDBY);
-  const [analysisJobs, setAnalysisJobs] = useState([]); // [{job_id, node_id, status, ...}]
-  const [threatEntities, setThreatEntities] = useState([]); // confirmed threat entities
-  const [replayUrls, setReplayUrls]     = useState({});    // node_id → replay MJPEG URL
+  const [analysisJobs, setAnalysisJobs] = useState([]);
+  const [threatEntities, setThreatEntities] = useState([]);
+  const [replayUrls, setReplayUrls]     = useState({});
   const [clearTimer, setClearTimer]     = useState(null);
+
+  // ── Multi-threat map state ───────────────────────────────────
+  // activeThreatNodes: [{node_id, name, lat, lng, threat_count, replay_url}]
+  const [activeThreatNodes, setActiveThreatNodes] = useState([]);
 
   // ── Polling ref to avoid stale closures ─────────────────────
   const analysisJobsRef = useRef([]);
@@ -150,15 +158,52 @@ export default function App() {
 
   useEffect(() => {
     fetchStatus();
-    const t = setInterval(fetchStatus, 500); // Fast polling for instant stream appearance
+    const t = setInterval(fetchStatus, 500);
     return () => clearInterval(t);
   }, [fetchStatus]);
+
+  useEffect(() => {
+    fetchNodes();
+    const t = setInterval(fetchNodes, 5000); // Sync nodes from backend every 5s
+    return () => clearInterval(t);
+  }, [fetchNodes]);
 
   useEffect(() => {
     fetchIncidents();
     const t = setInterval(fetchIncidents, 2000);
     return () => clearInterval(t);
   }, [fetchIncidents]);
+
+  // ── Poll /api/threats/active for multi-threat map zoom ───────
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/threats/active`);
+        if (!res.ok) return;
+        const threats = await res.json();
+        setActiveThreatNodes(threats);
+        // Keep mode in sync: if backend says there are active threats, enter THREAT mode
+        if (threats.length > 0) {
+          if (modeRef.current !== MODE.THREAT) {
+            setMode(MODE.THREAT);
+            playBrowserBuzzer(4);
+          }
+          // Build replayUrls for LiveFeed tab backward compat
+          const urls = {};
+          threats.forEach(t => { urls[t.node_id] = t.replay_url; });
+          setReplayUrls(urls);
+        } else if (modeRef.current === MODE.THREAT) {
+          // All threats cleared
+          setMode(MODE.STANDBY);
+          setReplayUrls({});
+          setThreatEntities([]);
+        }
+      } catch (e) { /* backend offline */ }
+    };
+    poll();
+    const t = setInterval(poll, 1500);
+    return () => clearInterval(t);
+  }, []);
 
   // ── Poll for Auto-Generated Jobs & Active Jobs ────────────────────────────────
   const [lastSeenJobId, setLastSeenJobId] = useState(null);
@@ -359,24 +404,26 @@ export default function App() {
     }
   }, [clearTimer]);
 
-  const dismissThreat = useCallback(() => {
+  const dismissThreat = useCallback(async (nodeId) => {
+    // Acknowledge this specific node's threat on the backend (decrements count)
+    if (nodeId) {
+      try {
+        await fetch(`${API_BASE}/api/admin/acknowledge/${nodeId}`, { method: 'POST' });
+      } catch (e) { /* ignore */ }
+      // /api/threats/active poll will pick up the new state automatically
+      return;
+    }
+    // Legacy: dismiss all (no nodeId passed — e.g. ESC key)
     setMode(MODE.STANDBY);
     setAnalysisJobs([]);
     setThreatEntities([]);
     setReplayUrls({});
-    
-    // Set a temporary "last seen" to a fake future value to act as a brief cooldown
-    // while we fetch the actual latest ID from the backend. This prevents race conditions
-    // where pollJobs immediately re-triggers the alert before the fetch completes.
     setLastSeenJobId(`COOLDOWN-${Date.now()}`);
-    
     fetch(`${API_BASE}/api/analyze/all`)
       .then(res => res.json())
       .then(data => {
          const jobs = data.jobs || [];
-         if (jobs.length > 0) {
-             setLastSeenJobId(jobs[jobs.length - 1].job_id);
-         }
+         if (jobs.length > 0) setLastSeenJobId(jobs[jobs.length - 1].job_id);
       })
       .catch(() => {});
   }, []);
@@ -428,6 +475,7 @@ export default function App() {
 
   return (
     <div className="h-screen w-screen bg-[#020617] text-[#94A3B8] font-sans overflow-hidden flex flex-col select-none">
+
 
       {/* THREAT ALARM OVERLAY MOVED TO MAP CONTAINER */}
 
@@ -487,6 +535,7 @@ export default function App() {
               entities={displayEntities}
               mode={mode}
               replayUrls={replayUrls}
+              activeThreatNodes={activeThreatNodes}
               onDismiss={dismissThreat}
             />
           </div>
@@ -504,6 +553,7 @@ export default function App() {
           setHighlight={() => {}}
           sidebarOpen={isThreat}   /* Auto-open when threat */
           setSidebarOpen={() => {}}
+          token={token}
         />
       </main>
     </div>

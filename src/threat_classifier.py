@@ -437,14 +437,24 @@ class TrackedEntity:
 
         # === APPROACH DETECTION ===
         areas = list(self.area_history)
+        is_approaching = False
         if len(areas) >= 15:
             early = np.mean(areas[:5])
             late = np.mean(areas[-5:])
             if early > 100 and late > early * 1.3:
+                is_approaching = True
                 behavior = "APPROACHING"
                 score += 10
                 if category not in ("HOSTILE_APPROACH",):
                     category = "BORDER_CROSSING"
+
+        # === INTELLIGENT CONTEXT AWARENESS (FAR DISTANCE) ===
+        latest_area = areas[-1] if areas else 0
+        is_hiding = self.current_posture in (PostureType.CROUCHING, PostureType.CRAWLING, PostureType.PRONE)
+        if latest_area < 4000 and not is_approaching and not is_hiding:
+            score = max(20, score - 20)
+            behavior = "DISTANT PARALLEL MOVEMENT"
+            category = "PERSON_DETECTED"
 
         # === BIOMECHANICAL GAIT ANALYSIS ===
         gait_data = self.gait_analyzer.analyze_kinematics(self.history, self.velocities)

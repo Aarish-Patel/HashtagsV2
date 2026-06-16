@@ -1,12 +1,12 @@
 idf_component_register(
     SRCS
-        "app_main.c"
+        "app_main.cpp"
         "camera_pipeline.c"
         "encoder_manager.c"
         "uvc_streaming.c"
         "uvc_controls.c"
         "perf_monitor.c"
-        "eth_init.c"
+        "hgic_lwip.c"
         "http_server.c"
     INCLUDE_DIRS
         "."
@@ -21,4 +21,8 @@ idf_component_register(
         esp_netif
         esp_event
         esp_http_server
+        nvs_flash
+        huge-ic-nonos-driver
+        cpp_bus_driver
+        private_library
 )
