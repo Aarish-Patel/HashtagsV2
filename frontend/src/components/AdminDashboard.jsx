@@ -466,9 +466,9 @@ export default function AdminDashboard() {
       <div className="max-w-[1800px] mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-6">
 
         {/* ── COL 1: Node Manager (3/12) ── */}
-        <div className="lg:col-span-3 flex flex-col gap-4">
-          <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4">
-            <div className="flex items-center justify-between mb-3">
+        <div className="lg:col-span-3 flex flex-col gap-4 h-[calc(100vh-160px)]">
+          <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4 flex flex-col h-full">
+            <div className="flex items-center justify-between mb-3 shrink-0">
               <h2 className="text-xs font-bold text-white uppercase tracking-widest flex items-center gap-2">
                 <MapPin size={13} className="text-[#00F5FF]" /> Field Nodes
               </h2>
@@ -479,12 +479,12 @@ export default function AdminDashboard() {
             </div>
 
             {showAddNode && (
-              <div className="mb-3">
+              <div className="mb-3 shrink-0">
                 <AddNodeForm onAdd={handleAddNode} onCancel={() => setShowAddNode(false)} />
               </div>
             )}
 
-            <div className="flex flex-col gap-3 overflow-y-auto max-h-[75vh] pr-2 custom-scrollbar">
+            <div className="flex flex-col gap-3 overflow-y-auto flex-1 pr-2 custom-scrollbar">
               {nodes.length === 0 && (
                 <div className="text-slate-600 text-xs text-center py-4 font-mono">No nodes loaded yet...</div>
               )}
