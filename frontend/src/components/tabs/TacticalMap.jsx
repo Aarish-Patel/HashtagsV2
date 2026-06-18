@@ -197,7 +197,7 @@ const TacticalMap = ({
                 position={[node.lat, node.lng]}
                 icon={threat ? createThreatIcon(threat.threat_count) : STANDBY_ICON}
               >
-                {threat && (
+                {threat ? (
                   <Popup
                     className="tactical-popup"
                     closeButton={false}
@@ -260,6 +260,28 @@ const TacticalMap = ({
                         </button>
                       </div>
                     </div>
+                  </Popup>
+                ) : (
+                  <Popup
+                    className="tactical-popup"
+                    closeButton={true}
+                    autoPan={true}
+                    minWidth={400}
+                  >
+                     <div className="bg-[#030B17]/97 backdrop-blur-md border border-[#00FF9C]/30 p-4 rounded-lg flex flex-col gap-3 shadow-2xl">
+                        <div className="text-[14px] font-black text-[#00FF9C] tracking-widest uppercase flex justify-between items-center">
+                          {node.name}
+                          <span className="text-[10px] text-[#00FF9C]/60">STANDBY FEED</span>
+                        </div>
+                        <div className="relative w-full aspect-video bg-black rounded overflow-hidden border border-[#00FF9C]/30 shadow-[0_0_20px_rgba(0,255,156,0.1)]">
+                          <img
+                            src={`${API_BASE}/video_feed/${node.id}`}
+                            className="w-full h-full object-contain"
+                            alt="Live Feed"
+                            onError={e => { e.target.src = `https://placehold.co/800x640/020617/1A2535?text=NO+SIGNAL`; }}
+                          />
+                        </div>
+                     </div>
                   </Popup>
                 )}
               </Marker>

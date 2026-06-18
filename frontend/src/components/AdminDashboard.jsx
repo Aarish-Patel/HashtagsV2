@@ -543,7 +543,7 @@ export default function AdminDashboard() {
             <div className="grid grid-cols-2 gap-x-6 gap-y-3">
               <div>
                 <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Prong B — YOLO</div>
-                {slider('Confidence', 'person_conf', 0.01, 0.50, 0.01, '#00F5FF')}
+                {slider('Confidence', 'person_conf', 0.01, 1.0, 0.01, '#00F5FF')}
                 {slider('YOLO Weight', 'prong_b_weight', 0.1, 3.0, 0.1, '#00F5FF')}
               </div>
               <div>

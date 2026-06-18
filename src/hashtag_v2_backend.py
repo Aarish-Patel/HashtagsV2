@@ -1027,8 +1027,12 @@ class CameraNode:
                 self._inference_cycle_count += 1
 
                 # If we detected an object here and ALARM_TRIGGER_TYPE is DETECTION, trigger it now.
+                # Only trigger if not already alarming to avoid blowing up the counter and queue
                 if self.alarm_trigger_type == "DETECTION" and len(detections) > 0:
-                     self.system.trigger_instant_alarm(self.node_id, detections, from_inference=True)
+                    with self._threat_count_lock:
+                        already_alarming = self._active_threat_count > 0
+                    if not already_alarming:
+                         self.system.trigger_instant_alarm(self.node_id, detections, from_inference=True)
 
             except Exception as e:
                 _log_exception(self.node_id, e, context="inference_loop")
