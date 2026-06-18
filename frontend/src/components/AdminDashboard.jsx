@@ -405,8 +405,8 @@ export default function AdminDashboard() {
   const selectedNodeInfo = nodes.find(n => n.id === selectedNode);
 
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-300 font-sans p-4 lg:p-6 flex flex-col">
-      <header className="flex items-center justify-between border-b border-slate-800 pb-4 mb-6">
+    <div className="h-screen overflow-hidden bg-[#020617] text-slate-300 font-sans p-4 lg:p-6 flex flex-col">
+      <header className="flex items-center justify-between border-b border-slate-800 pb-4 mb-6 shrink-0">
         <div className="flex items-center gap-3">
           <Settings className="text-[#00F5FF] w-7 h-7" />
           <h1 className="text-xl font-bold tracking-widest text-white uppercase">System Admin Console</h1>
@@ -418,7 +418,7 @@ export default function AdminDashboard() {
       </header>
 
       {/* ── Tab bar ── */}
-      <div className="flex gap-1 mb-4 border-b border-slate-800 pb-0">
+      <div className="flex gap-1 mb-4 border-b border-slate-800 pb-0 shrink-0">
         {[
           { id: 'CONTROL', label: 'Control Panel', Icon: Settings },
           { id: 'DEBUG',   label: 'Live Debug',    Icon: Bug, accent: '#FF3B3B' },
@@ -436,9 +436,9 @@ export default function AdminDashboard() {
       </div>
 
       {adminTab === 'DEBUG' ? (
-        <div className="flex gap-4">
+        <div className="flex gap-4 flex-1 min-h-0">
           {/* Compact node selector for debug mode */}
-          <div className="w-56 shrink-0 bg-[#030B17] border border-slate-800 rounded-xl p-3 h-fit">
+          <div className="w-56 shrink-0 bg-[#030B17] border border-slate-800 rounded-xl p-3 h-full overflow-y-auto custom-scrollbar">
             <div className="text-[9px] font-bold text-slate-600 uppercase tracking-widest mb-2">Select Node</div>
             <div className="flex flex-col gap-1.5">
               {nodes.map(n => (
@@ -458,15 +458,15 @@ export default function AdminDashboard() {
               {nodes.length === 0 && <div className="text-slate-700 text-[10px] font-mono">No nodes loaded</div>}
             </div>
           </div>
-          <div className="flex-1 min-w-0">
+          <div className="flex-1 min-w-0 h-full overflow-hidden">
             <DebugPanel nodeId={selectedNode} nodes={nodes} />
           </div>
         </div>
       ) : (
-      <div className="max-w-[1800px] mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <div className="max-w-[1800px] mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1 min-h-0">
 
         {/* ── COL 1: Node Manager (3/12) ── */}
-        <div className="lg:col-span-3 flex flex-col gap-4 h-[calc(100vh-160px)]">
+        <div className="lg:col-span-3 flex flex-col gap-4 h-full min-h-0">
           <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4 flex flex-col h-full">
             <div className="flex items-center justify-between mb-3 shrink-0">
               <h2 className="text-xs font-bold text-white uppercase tracking-widest flex items-center gap-2">
@@ -501,10 +501,10 @@ export default function AdminDashboard() {
         </div>
 
         {/* ── COL 2: Video Monitor + Tuning (6/12) ── */}
-        <div className="lg:col-span-6 flex flex-col gap-4">
+        <div className="lg:col-span-6 flex flex-col gap-4 h-full min-h-0 overflow-y-auto custom-scrollbar pr-2">
 
           {/* Video */}
-          <div className="bg-[#000] border-2 border-slate-800 rounded-xl overflow-hidden relative min-h-[420px] flex items-center justify-center">
+          <div className="bg-[#000] border-2 border-slate-800 rounded-xl overflow-hidden relative min-h-[420px] flex items-center justify-center shrink-0">
             {selectedNode ? (
               <>
                 <div className="absolute top-3 right-3 z-10 bg-black/50 backdrop-blur border border-white/10 px-3 py-1.5 rounded flex flex-col items-end pointer-events-none">
@@ -535,7 +535,7 @@ export default function AdminDashboard() {
           </div>
 
           {/* Tuning */}
-          <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4">
+          <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4 shrink-0">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xs font-bold text-white uppercase tracking-widest">Sensitivity Tuning</h3>
               {hasUnsavedChanges && <span className="text-[9px] text-yellow-500 animate-pulse font-bold">UNSAVED</span>}
@@ -571,7 +571,7 @@ export default function AdminDashboard() {
         </div>
 
         {/* ── COL 3: Actions + Telemetry (3/12) ── */}
-        <div className="lg:col-span-3 flex flex-col gap-4">
+        <div className="lg:col-span-3 flex flex-col gap-4 h-full min-h-0 overflow-y-auto custom-scrollbar pr-2">
 
           {/* Actions */}
           <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4 flex flex-col gap-2">

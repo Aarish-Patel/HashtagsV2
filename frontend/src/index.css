@@ -75,12 +75,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(0, 245, 255, 0.3); /* subtle cyan */
   border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--accent-cyan);
+  background: rgba(0, 245, 255, 0.8);
 }
 
 /* MEDICAL HEARTBEAT ANIMATION */
