@@ -27,11 +27,12 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo [1/4] Checking Backend Dependencies...
 cd /d "%~dp0src"
+set PYTHON_CMD=python
+py -3.11 -V >nul 2>&1
+if %ERRORLEVEL% EQU 0 set PYTHON_CMD=py -3.11
+
 if not exist "venv\Scripts\activate.bat" (
     echo Creating Python virtual environment...
-    set PYTHON_CMD=python
-    py -3.11 -V >nul 2>&1
-    if %ERRORLEVEL% EQU 0 set PYTHON_CMD=py -3.11
     %PYTHON_CMD% -m venv venv
     call venv\Scripts\activate
     echo Installing Python packages...
