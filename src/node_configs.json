@@ -51,7 +51,7 @@
     "prong_b_fp_score": 4.5
   },
   "HASH-4": {
-    "person_conf": 0.5,
+    "person_conf": 1.0,
     "prong_b_weight": 1.0,
     "canny_low": 50,
     "canny_high": 150,
@@ -68,7 +68,7 @@
     "prong_b_fp_score": 0.0
   },
   "HASH-5": {
-    "person_conf": 0.05,
+    "person_conf": 1.0,
     "prong_b_weight": 1.0,
     "canny_low": 50,
     "canny_high": 150,

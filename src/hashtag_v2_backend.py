@@ -1440,7 +1440,8 @@ class HashtagSystem:
                 print(f"[{nid}] BLOCKED: Integer device ID is not a valid field camera URL. Skipping.")
                 continue
             self._add_node(nid, url, name=nd.get("name", nid),
-                           lat=nd.get("lat", 0.0), lng=nd.get("lng", 0.0))
+                           lat=nd.get("lat", 0.0), lng=nd.get("lng", 0.0),
+                           alarm_trigger_type=nd.get("alarm_trigger_type", "PIR"))
 
     def _add_node(self, node_id: str, stream_url: Any, name="", lat=0.0, lng=0.0, alarm_trigger_type="PIR") -> CameraNode:
         node = CameraNode(node_id, stream_url, self, self.engine, self.degrader, name=name, lat=lat, lng=lng, alarm_trigger_type=alarm_trigger_type)
