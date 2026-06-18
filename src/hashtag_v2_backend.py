@@ -251,16 +251,18 @@ def _play_buzzer(threat_level: int):
     def _beep():
         try:
             import winsound
-            if threat_level >= 4:   # CRITICAL
-                for _ in range(5):
-                    winsound.Beep(1200, 200)
-                    time.sleep(0.05)
-            elif threat_level >= 3: # HIGH
-                for _ in range(3):
-                    winsound.Beep(900, 150)
+            if threat_level >= 4:   # CRITICAL (Military Red Alert Siren)
+                # Sweep up from 400Hz to 1200Hz
+                for _ in range(3): # 3 loud sweeping blasts
+                    for freq in range(400, 1200, 100):
+                        winsound.Beep(freq, 30)
+                    time.sleep(0.1)
+            elif threat_level >= 3: # HIGH (Submarine Dive Horn)
+                for _ in range(2):
+                    winsound.Beep(300, 400)
                     time.sleep(0.1)
             else:                   # MEDIUM
-                winsound.Beep(700, 350)
+                winsound.Beep(500, 300)
         except Exception:
             pass
     threading.Thread(target=_beep, daemon=True).start()
@@ -983,15 +985,34 @@ class CameraNode:
                 })
 
                 # === Build Viz Frame based on selected mode ===
-                viz_frame = frame_to_process.copy()
-                # COMBINED: draw intersection-validated boxes
-                for det in detections:
-                    x1, y1 = det.x, det.y
-                    x2, y2 = det.x + det.w, det.y + det.h
-                    color = (0, 0, 255) if det.class_name in ["Weapon"] else (0, 255, 255)
-                    cv2.rectangle(viz_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-                    cv2.putText(viz_frame, f"{det.class_name} {det.confidence:.2f}",
-                                (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+                if self._viz_mode == "PRONG_A" and motion_mask is not None:
+                    # Show structural motion mask (heatmap-style)
+                    viz_frame = cv2.applyColorMap(motion_mask, cv2.COLORMAP_JET)
+                    # Overlay motion boxes in green
+                    for m_box in motion_boxes:
+                        x, y, w, h = m_box
+                        cv2.rectangle(viz_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                        
+                elif self._viz_mode == "PRONG_B":
+                    # Show YOLO raw detections in blue
+                    viz_frame = frame_to_process.copy()
+                    for det in yolo_detections:
+                        x1, y1 = det.x, det.y
+                        x2, y2 = det.x + det.w, det.y + det.h
+                        cv2.rectangle(viz_frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
+                        cv2.putText(viz_frame, f"YOLO {det.confidence:.2f}",
+                                    (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1, cv2.LINE_AA)
+                                    
+                else:
+                    # COMBINED (Default): draw intersection-validated boxes
+                    viz_frame = frame_to_process.copy()
+                    for det in detections:
+                        x1, y1 = det.x, det.y
+                        x2, y2 = det.x + det.w, det.y + det.h
+                        color = (0, 0, 255) if det.class_name in ["Weapon"] else (0, 255, 255)
+                        cv2.rectangle(viz_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                        cv2.putText(viz_frame, f"{det.class_name} {det.confidence:.2f}",
+                                    (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
 
                 with self._det_lock:
                     self._latest_detections = detections
@@ -1951,31 +1972,23 @@ class HashtagSystem:
     def trigger_analysis(self) -> List[str]:
         """
         Called when SPACEBAR is pressed.
-        Snapshots all node buffers and queues analysis jobs.
-        Returns list of job_ids (one per node).
+        Snapshots all node buffers and saves them directly as live clips.
+        Returns empty list of job_ids.
         """
         job_ids = []
         for nid, node in self.nodes.items():
             job_id = str(uuid.uuid4())
-            mp4_path = os.path.join(CLIPS_DIR, f"{job_id}.mp4")
-            if node._save_buffer_to_mp4(mp4_path):
-                job = AnalysisJob(job_id, nid, mp4_path)
-
-                with self._job_lock:
-                    self._jobs[job_id] = job
-
-                # Run analysis in background thread
-                threading.Thread(
-                    target=self._run_job, args=(job,), daemon=True
-                ).start()
-
-                job_ids.append(job_id)
-                print(f"[ANALYZE] {nid} | Job {job_id[:8]} queued")
+            with node._lock:
+                frames = list(node.frame_buffer)
+            if frames:
+                self.save_live_clip(nid, frames, node._latest_detections)
+                print(f"[ANALYZE] {nid} | Live clip saved via spacebar")
             else:
                 print(f"[ANALYZE] {nid} | Buffer empty, skipping")
 
-        self._log_event("SPACE_TRIGGER", f"Analysis triggered on {len(job_ids)} nodes")
+        self._log_event("SPACE_TRIGGER", f"Live clips saved on nodes")
         return job_ids
+
 
     def _run_job(self, job: AnalysisJob):
         """Run analysis job with GPU concurrency limit to prevent OOM crashes."""

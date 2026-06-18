@@ -30,7 +30,7 @@
   {
     "id": "HASH-5",
     "name": "Node 202",
-    "stream_url": "http://192.168.0.202/stream",
+    "stream_url": "http://192.168.0.202:81/stream",
     "lat": 24.173,
     "lng": 94.259
   }

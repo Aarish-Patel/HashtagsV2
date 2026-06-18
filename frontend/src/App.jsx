@@ -31,21 +31,33 @@ const MODE = {
 function playBrowserBuzzer(threatLevel) {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const freqs = threatLevel >= 4 ? [1200, 1000, 1200, 1000, 1200]
-                : threatLevel >= 3 ? [900, 700, 900]
-                : [700];
-    freqs.forEach((f, i) => {
+    // Military-style Klaxon (General Quarters / Intruder Alert)
+    const blast = (delay) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.connect(gain);
       gain.connect(ctx.destination);
-      osc.frequency.value = f;
-      osc.type = 'square';
-      gain.gain.setValueAtTime(0.15, ctx.currentTime + i * 0.28);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + i * 0.28 + 0.22);
-      osc.start(ctx.currentTime + i * 0.28);
-      osc.stop(ctx.currentTime + i * 0.28 + 0.24);
-    });
+      
+      osc.type = 'sawtooth';
+      
+      // Harsh low frequency for klaxon effect
+      osc.frequency.setValueAtTime(250, ctx.currentTime + delay);
+      // Slight pitch bend down at the end of the blast
+      osc.frequency.linearRampToValueAtTime(200, ctx.currentTime + delay + 0.35);
+      
+      gain.gain.setValueAtTime(0, ctx.currentTime + delay);
+      gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + delay + 0.02); // Sharp attack
+      gain.gain.setValueAtTime(0.4, ctx.currentTime + delay + 0.25);          // Sustain
+      gain.gain.linearRampToValueAtTime(0, ctx.currentTime + delay + 0.35);   // Fast release
+      
+      osc.start(ctx.currentTime + delay);
+      osc.stop(ctx.currentTime + delay + 0.4);
+    };
+    
+    // Play 3 rapid blasts
+    blast(0);
+    blast(0.45);
+    blast(0.90);
   } catch (e) { /* browser may block without user gesture */ }
 }
 
