@@ -472,13 +472,18 @@ class BatchAnalyzer:
                 if t.stale_frames < 5 and t.bboxes:
                     active_boxes.append(t.bboxes[-1])
 
+            sys_obj = get_system()
+            cfg = sys_obj.get_node_config(node_id) if sys_obj else None
+            person_conf_override = max(0.01, cfg.person_conf * cfg.prong_b_weight) if cfg else None
+
             # Raw detection with tracking persistence
             detections = self.engine.detect(
                 frame, 
                 cam_id=node_num, 
                 fps=TARGET_FPS, 
                 active_boxes=active_boxes,
-                motion_mask=None
+                motion_mask=None,
+                person_conf_override=person_conf_override
             )
 
             annotated = frame.copy()
