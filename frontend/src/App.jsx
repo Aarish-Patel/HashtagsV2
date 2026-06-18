@@ -186,8 +186,8 @@ export default function App() {
         if (threats.length > 0) {
           if (modeRef.current !== MODE.THREAT) {
             setMode(MODE.THREAT);
-            playBrowserBuzzer(4);
           }
+          playBrowserBuzzer(4);
           // Build replayUrls for LiveFeed tab backward compat
           const urls = {};
           threats.forEach(t => { urls[t.node_id] = t.replay_url; });
@@ -407,8 +407,13 @@ export default function App() {
   const dismissThreat = useCallback(async (nodeId) => {
     // Acknowledge this specific node's threat on the backend (decrements count)
     if (nodeId) {
+      // Optimistic UI update for snappy feedback
+      setActiveThreatNodes(prev => prev.map(t => t.node_id === nodeId ? {...t, threat_count: t.threat_count - 1} : t).filter(t => t.threat_count > 0));
       try {
-        await fetch(`${API_BASE}/api/admin/acknowledge/${nodeId}`, { method: 'POST' });
+        await fetch(`${API_BASE}/api/admin/acknowledge/${nodeId}`, {
+          method: 'POST',
+          headers: { 'Authorization': token ? 'Bearer ' + token : '' }
+        });
       } catch (e) { /* ignore */ }
       // /api/threats/active poll will pick up the new state automatically
       return;

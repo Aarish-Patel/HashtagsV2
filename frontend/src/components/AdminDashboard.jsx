@@ -562,6 +562,21 @@ export default function AdminDashboard() {
                 {slider('Canny Low', 'canny_low', 10, 100, 10, '#64748B')}
                 {slider('Canny High', 'canny_high', 100, 300, 10, '#64748B')}
               </div>
+              <div className="col-span-2 mt-2">
+                <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Display Mode (Diagnostic)</div>
+                <div className="flex gap-2">
+                  {vizModes.map(m => (
+                    <button key={m.id} onClick={() => handleSetVizMode(m.id)}
+                      className={`flex-1 text-center px-2 py-1.5 rounded border text-[9px] font-bold tracking-widest uppercase transition-all ${
+                        vizMode === m.id
+                          ? 'bg-[#00F5FF]/10 border-[#00F5FF]/40 text-[#00F5FF]'
+                          : 'bg-black/30 border-slate-800 text-slate-500 hover:text-slate-300'
+                      }`}>
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
             <button onClick={() => saveConfig()} disabled={!hasUnsavedChanges || !selectedNode || loading}
               className="mt-4 w-full bg-[#00F5FF]/10 hover:bg-[#00F5FF]/20 border border-[#00F5FF]/50 text-[#00F5FF] font-bold py-2 rounded text-xs disabled:opacity-30">

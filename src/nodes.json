@@ -26,5 +26,12 @@
     "stream_url": "http://192.168.0.201:81/stream",
     "lat": 24.172,
     "lng": 94.258
+  },
+  {
+    "id": "HASH-5",
+    "name": "Node 202",
+    "stream_url": "http://192.168.0.202/stream",
+    "lat": 24.173,
+    "lng": 94.259
   }
 ]
