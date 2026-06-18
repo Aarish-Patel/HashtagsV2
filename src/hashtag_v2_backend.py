@@ -251,12 +251,16 @@ def _play_buzzer(threat_level: int):
     def _beep():
         try:
             import winsound
-            if threat_level >= 4:   # CRITICAL (Military Red Alert Siren)
-                # Sweep up from 400Hz to 1200Hz
-                for _ in range(3): # 3 loud sweeping blasts
-                    for freq in range(400, 1200, 100):
-                        winsound.Beep(freq, 30)
-                    time.sleep(0.1)
+            if threat_level >= 4:   # CRITICAL (Play custom alarm)
+                wav_path = os.path.join(os.path.dirname(__file__), "alarm.wav")
+                if os.path.exists(wav_path):
+                    # Play asynchronously in a loop. It will be stopped when acknowledged.
+                    winsound.PlaySound(wav_path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP)
+                else:
+                    for _ in range(3):
+                        for freq in range(400, 1200, 100):
+                            winsound.Beep(freq, 30)
+                        time.sleep(0.1)
             elif threat_level >= 3: # HIGH (Submarine Dive Horn)
                 for _ in range(2):
                     winsound.Beep(300, 400)
@@ -1758,6 +1762,16 @@ class HashtagSystem:
         if not node:
             return
         node._active_threat_count = max(0, node._active_threat_count - 1)
+        
+        # Check global unacknowledged threat count
+        total_threats = sum(n._active_threat_count for n in self.nodes.values())
+        if total_threats == 0:
+            try:
+                import winsound
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            except Exception:
+                pass
+                
         if node._active_threat_count == 0:
             node.threat_detected_this_session = False
             node._was_online = False

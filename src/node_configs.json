@@ -61,7 +61,7 @@
     "pixel_diff_threshold": 18,
     "intersection_iou": 0.1,
     "intersection_containment": 0.2,
-    "min_contour_area": 50,
+    "min_contour_area": 270,
     "clip_retention_days": 7,
     "fp_count": 0,
     "prong_a_fp_score": 0.0,

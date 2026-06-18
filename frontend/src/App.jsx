@@ -27,38 +27,29 @@ const MODE = {
   CLEAR:     'CLEAR',
 };
 
-// Web Audio buzzer (browser-side backup for Python winsound)
-function playBrowserBuzzer(threatLevel) {
+// Browser-side alarm using the custom MP3 file
+let activeAlarmAudio = null;
+
+function playBrowserBuzzer() {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    // Military-style Klaxon (General Quarters / Intruder Alert)
-    const blast = (delay) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      
-      osc.type = 'sawtooth';
-      
-      // Harsh low frequency for klaxon effect
-      osc.frequency.setValueAtTime(250, ctx.currentTime + delay);
-      // Slight pitch bend down at the end of the blast
-      osc.frequency.linearRampToValueAtTime(200, ctx.currentTime + delay + 0.35);
-      
-      gain.gain.setValueAtTime(0, ctx.currentTime + delay);
-      gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + delay + 0.02); // Sharp attack
-      gain.gain.setValueAtTime(0.4, ctx.currentTime + delay + 0.25);          // Sustain
-      gain.gain.linearRampToValueAtTime(0, ctx.currentTime + delay + 0.35);   // Fast release
-      
-      osc.start(ctx.currentTime + delay);
-      osc.stop(ctx.currentTime + delay + 0.4);
-    };
-    
-    // Play 3 rapid blasts
-    blast(0);
-    blast(0.45);
-    blast(0.90);
-  } catch (e) { /* browser may block without user gesture */ }
+    if (!activeAlarmAudio) {
+      activeAlarmAudio = new Audio('/alarm.mp3');
+      activeAlarmAudio.loop = true; // Repeat the alarm
+    }
+    // Prevent overlapping play calls
+    if (activeAlarmAudio.paused) {
+      activeAlarmAudio.play().catch(e => console.warn("Browser blocked audio playback without interaction", e));
+    }
+  } catch (e) {
+    console.warn("Failed to play alarm audio", e);
+  }
+}
+
+function stopBrowserBuzzer() {
+  if (activeAlarmAudio) {
+    activeAlarmAudio.pause();
+    activeAlarmAudio.currentTime = 0;
+  }
 }
 
 export default function App() {
@@ -417,6 +408,9 @@ export default function App() {
   }, [clearTimer]);
 
   const dismissThreat = useCallback(async (nodeId) => {
+    // Stop the alarm immediately
+    stopBrowserBuzzer();
+    
     // Acknowledge this specific node's threat on the backend (decrements count)
     if (nodeId) {
       // Optimistic UI update for snappy feedback
