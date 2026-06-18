@@ -431,23 +431,23 @@ class DetectionEngine:
             active_boxes = self.last_boxes.get(cam_id, [])
 
         verified = self._detect_persons(frame, active_boxes, motion_mask, conf)
-            if not verified:
-                self.last_boxes[cam_id] = []
-                return []
+        if not verified:
+            self.last_boxes[cam_id] = []
+            return []
 
-            # === STAGE 2: Weapon Detection ===
-            weapon_dets = self._detect_weapons(frame)
+        # === STAGE 2: Weapon Detection ===
+        weapon_dets = self._detect_weapons(frame)
 
-            # Filter false positive weapons: must overlap with a verified person
-            valid_weapons = []
-            for wd in weapon_dets:
-                for pd in verified:
-                    if pd.class_name == "Person":
-                        if compute_iou(wd.bbox, pd.bbox) > 0 or compute_containment(wd.bbox, pd.bbox) > 0 or compute_containment(pd.bbox, wd.bbox) > 0:
-                            valid_weapons.append(wd)
-                            break
+        # Filter false positive weapons: must overlap with a verified person
+        valid_weapons = []
+        for wd in weapon_dets:
+            for pd in verified:
+                if pd.class_name == "Person":
+                    if compute_iou(wd.bbox, pd.bbox) > 0 or compute_containment(wd.bbox, pd.bbox) > 0 or compute_containment(pd.bbox, wd.bbox) > 0:
+                        valid_weapons.append(wd)
+                        break
 
-            verified.extend(valid_weapons)
+        verified.extend(valid_weapons)
 
         # === STAGE 3: Hierarchical NMS — 1 box per entity ===
         final = hierarchical_nms(verified, iou_thresh=0.25, containment_thresh=0.40)
