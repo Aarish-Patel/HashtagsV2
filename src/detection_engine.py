@@ -521,30 +521,31 @@ class DetectionEngine:
 
         # --- FALLBACK: Extreme Close-Up Face Detection ---
         # YOLOv8 struggles when the frame is 90% face/head.
-        try:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
-            for (x, y, w, h) in faces:
-                # Expand the box slightly downward to cover shoulders
-                bbox = (x, y, w, int(h * 1.5))
-                
-                is_duplicate = False
-                for v in verified:
-                    if compute_iou(bbox, v.bbox) > 0.1 or compute_containment(bbox, v.bbox) > 0.5:
-                        is_duplicate = True
-                        break
-                        
-                if not is_duplicate:
-                    verified.append(Detection(
-                        x=bbox[0], y=bbox[1], w=bbox[2], h=bbox[3],
-                        confidence=0.85,
-                        class_name="Person",
-                        source="face_fallback",
-                        keypoints=None,
-                        metadata={}
-                    ))
-        except Exception as e:
-            pass
+        if 0.85 >= conf:
+            try:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
+                for (x, y, w, h) in faces:
+                    # Expand the box slightly downward to cover shoulders
+                    bbox = (x, y, w, int(h * 1.5))
+                    
+                    is_duplicate = False
+                    for v in verified:
+                        if compute_iou(bbox, v.bbox) > 0.1 or compute_containment(bbox, v.bbox) > 0.5:
+                            is_duplicate = True
+                            break
+                            
+                    if not is_duplicate:
+                        verified.append(Detection(
+                            x=bbox[0], y=bbox[1], w=bbox[2], h=bbox[3],
+                            confidence=0.85,
+                            class_name="Person",
+                            source="face_fallback",
+                            keypoints=None,
+                            metadata={}
+                        ))
+            except Exception as e:
+                pass
 
         return verified
 

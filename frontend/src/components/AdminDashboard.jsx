@@ -550,7 +550,7 @@ export default function AdminDashboard() {
                 <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Prong A — Structural</div>
                 {slider('Edge Threshold', 'prong_a_threshold', 5, 80, 1, '#94A3B8')}
                 {slider('Prong A Weight', 'prong_a_weight', 0.1, 3.0, 0.1, '#94A3B8')}
-                {slider('Min Blob (px²)', 'min_contour_area', 20, 500, 10, '#94A3B8')}
+                {slider('Min Blob (px²)', 'min_contour_area', 20, 307200, 100, '#94A3B8')}
               </div>
               <div>
                 <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Intersection Gate</div>

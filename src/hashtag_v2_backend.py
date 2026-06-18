@@ -902,12 +902,14 @@ class CameraNode:
                 motion_boxes = []
 
                 # === Build Prong A blobs ===
+                clean_motion_mask = np.zeros_like(motion_mask) if motion_mask is not None else None
                 if motion_mask is not None:
                     contours, _ = cv2.findContours(motion_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     for cnt in contours:
                         area = cv2.contourArea(cnt)
                         if area > cfg.min_contour_area * cfg.prong_a_weight:
                             motion_boxes.append(cv2.boundingRect(cnt))
+                            cv2.drawContours(clean_motion_mask, [cnt], -1, 255, -1)
                     if len(motion_boxes) > 0:
                         self._had_large_discrepancy = True
                         self._last_prong_a_blob_area = int(sum(b[2]*b[3] for b in motion_boxes) / len(motion_boxes))
@@ -989,9 +991,9 @@ class CameraNode:
                 })
 
                 # === Build Viz Frame based on selected mode ===
-                if self._viz_mode == "PRONG_A" and motion_mask is not None:
+                if self._viz_mode == "PRONG_A" and clean_motion_mask is not None:
                     # Show structural motion mask (heatmap-style)
-                    viz_frame = cv2.applyColorMap(motion_mask, cv2.COLORMAP_JET)
+                    viz_frame = cv2.applyColorMap(clean_motion_mask, cv2.COLORMAP_JET)
                     # Overlay motion boxes in green
                     for m_box in motion_boxes:
                         x, y, w, h = m_box
@@ -1573,6 +1575,7 @@ class HashtagSystem:
                 "stream_url": node.stream_url,
                 "lat": node.lat,
                 "lng": node.lng,
+                "alarm_trigger_type": getattr(node, "alarm_trigger_type", "PIR"),
                 "online": node.online,
                 "fps": round(node._fps, 1),
                 "clips_saved": node.clips_saved,
