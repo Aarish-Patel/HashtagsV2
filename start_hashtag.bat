@@ -27,7 +27,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo [1/4] Checking Backend Dependencies...
 cd /d "%~dp0src"
-if not exist "venv" (
+if not exist "venv\Scripts\activate.bat" (
     echo Creating Python virtual environment...
     python -m venv venv
     call venv\Scripts\activate
@@ -40,7 +40,7 @@ if not exist "venv" (
 echo.
 echo [2/4] Checking Frontend Dependencies...
 cd /d "%~dp0frontend"
-if not exist "node_modules" (
+if not exist "node_modules\" (
     echo Installing Node packages...
     call npm install
 )
