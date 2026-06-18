@@ -692,11 +692,11 @@ class EntityTracker:
                     if track.class_name == "Person" and track.bboxes:
                         gx, gy, gw, gh = track.bboxes[-1]
                         pad = int(max(gw, gh) * 0.4)
-                        ghost_bbox = (
-                            max(0, gx - pad), max(0, gy - pad),
-                            min(self.img_w - gx + pad, gw + 2 * pad),
-                            min(self.img_h - gy + pad, gh + 2 * pad)
-                        )
+                        x0 = max(0, gx - pad)
+                        y0 = max(0, gy - pad)
+                        x1 = min(self.img_w, gx + gw + pad)
+                        y1 = min(self.img_h, gy + gh + pad)
+                        ghost_bbox = (x0, y0, x1 - x0, y1 - y0)
                         self.ghost_zones.append(GhostZone(ghost_bbox, tid, self.ghost_zone_ttl))
                     to_del.append(tid)
                     continue

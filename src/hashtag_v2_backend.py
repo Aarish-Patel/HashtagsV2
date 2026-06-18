@@ -124,7 +124,7 @@ _DEFAULT_NODES = [
 # known local path. Set the env var for deployment on a different machine.
 DEFAULT_MODEL_PATH = os.environ.get(
     "HASHTAG_MODEL_PATH",
-    r"C:\Users\hsiraa\runs\detect\Advanced_Person_Detection\Occlusion_Camouflage_V1-7\weights\best.pt"
+    "yolov8n.pt"
 )
 
 TARGET_W, TARGET_H = 800, 640
@@ -136,6 +136,7 @@ BUZZER_COOLDOWN_SEC = 10
 # Max concurrent GPU batch analysis jobs to prevent OOM on multi-camera wakeup.
 # If 5 cameras wake up simultaneously, 5 GPU jobs would OOM. This cap queues extras.
 _BATCH_SEMAPHORE = threading.Semaphore(2)
+_journal_lock = threading.Lock()
 
 
 # ===========================
@@ -364,7 +365,7 @@ class AnalysisJob:
     STATUS_COMPLETE = "COMPLETE"
     STATUS_CLEAR = "CLEAR"
 
-    def __init__(self, job_id: str, node_id: str, mp4_path: str):
+    def __init__(self, job_id: str, node_id: str, frames: List[np.ndarray], mp4_path: str = None):
         self.job_id = job_id
         self.node_id = node_id
         self.mp4_path = mp4_path       # Path to the temporary MP4
@@ -373,7 +374,7 @@ class AnalysisJob:
         self.threat_detected = False
         self.max_threat_level = 0
         self.entities: List[Dict] = []
-        self.annotated_frames: List[np.ndarray] = []  # JPEG bytes for replay
+        self.annotated_frames: List[np.ndarray] = frames  # JPEG bytes for replay
         self.clip_path: str = ""
         self.created_at = time.time()
         self.completed_at: float = 0.0
@@ -534,18 +535,17 @@ class BatchAnalyzer:
             job.threat_detected = threat_detected
             job.max_threat_level = final_max_threat
             job.entities = final_entities if threat_detected else []
-            job.annotated_frames = annotated_out
             job.clip_path = clip_path
             job.completed_at = time.time()
 
     def _save_clip(self, job_id: str, node_id: str,
                    frames: List[np.ndarray], entities: List[Dict]) -> str:
+        """Write annotated frames to an MP4 file and JSON sidecar."""
         # Add a "LOOP RESTART" frame to the end so it doesn't look static if the clip is very short
         blank = np.zeros((TARGET_H, TARGET_W, 3), dtype=np.uint8)
         cv2.putText(blank, "LOOP RESTARTING...", (TARGET_W//2 - 150, TARGET_H//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
-        frames.append(blank)
+        frames_to_save = frames + [blank]
 
-        """Write annotated frames to an MP4 file and JSON sidecar."""
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         
         sys_obj = get_system()
@@ -561,11 +561,11 @@ class BatchAnalyzer:
         fname = f"{ts}_{loc}_{safe_name}.mp4"
         fpath = os.path.join(CLIPS_DIR, fname)
 
-        if frames:
-            h, w = frames[0].shape[:2]
+        if frames_to_save:
+            h, w = frames_to_save[0].shape[:2]
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(fpath, fourcc, TARGET_FPS, (w, h))
-            for f in frames:
+            for f in frames_to_save:
                 writer.write(f)
             writer.release()
             
@@ -611,13 +611,14 @@ class BatchAnalyzer:
 
         # Forensic journal
         try:
-            journal = []
-            if os.path.exists(FORENSIC_JOURNAL_PATH):
-                with open(FORENSIC_JOURNAL_PATH) as f:
-                    journal = json.load(f)
-            journal.append(report)
-            with open(FORENSIC_JOURNAL_PATH, "w") as f:
-                json.dump(journal[-500:], f, indent=2)
+            with _journal_lock:
+                journal = []
+                if os.path.exists(FORENSIC_JOURNAL_PATH):
+                    with open(FORENSIC_JOURNAL_PATH) as f:
+                        journal = json.load(f)
+                journal.append(report)
+                with open(FORENSIC_JOURNAL_PATH, "w") as f:
+                    json.dump(journal[-500:], f, indent=2)
         except Exception:
             pass
 
@@ -637,20 +638,19 @@ class CameraNode:
     """
 
     def __init__(self, node_id: str, stream_url: Any, system_ref, engine,
-                 degrader: Optional[OV5647Degrader] = None, name: str = "", lat: float = 0.0, lng: float = 0.0):
+                 degrader: Optional[OV5647Degrader] = None, name: str = "", lat: float = 0.0, lng: float = 0.0, alarm_trigger_type: str = "PIR"):
         self.node_id = node_id
         self.stream_url = stream_url
         self.name = name
         self.lat = lat
         self.lng = lng
+        self.alarm_trigger_type = alarm_trigger_type
         self.system = system_ref
         self.engine = engine
         self.degrader = degrader or OV5647Degrader()
 
         self.online = False
         self._stopped = False
-        self.clips_saved = 0
-
         self.clips_saved = 0
 
         self.temp_mp4_path = os.path.join(CLIPS_DIR, f"temp_{self.node_id}.mp4")
@@ -708,6 +708,7 @@ class CameraNode:
 
         # ── Multi-threat tracking ────────────────────────────────────────
         self._active_threat_count: int = 0        # unacknowledged threats on this node
+        self._threat_count_lock = threading.Lock()
 
         # ── Debug telemetry ──────────────────────────────────────────────
         self._last_capture_ts: float = 0.0         # when capture loop last got a frame
@@ -749,6 +750,7 @@ class CameraNode:
         mog2 = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
 
         while not self._stopped:
+            time.sleep(0.010)
             frame_to_process = self.get_raw_frame()
             if frame_to_process is None:
                 time.sleep(0.1)
@@ -767,7 +769,7 @@ class CameraNode:
                 if self.permanent_bg_edges is not None and self._bg_capture_mean_brightness is not None:
                     gray_check = cv2.cvtColor(frame_to_process, cv2.COLOR_BGR2GRAY)
                     current_brightness = float(np.mean(gray_check))
-                    self._brightness_delta = abs(current_brightness - self._bg_capture_mean_brightness) / max(self._bg_capture_mean_brightness, 1.0)
+                    self._brightness_delta = abs(current_brightness - self._bg_capture_mean_brightness) / max(self._bg_capture_mean_brightness, 30.0)
                     if self._brightness_delta > 0.65:  # raised from 0.40 → 0.65
                         self._bg_invalidation_strike = getattr(self, '_bg_invalidation_strike', 0) + 1
                         if self._bg_invalidation_strike >= 3:
@@ -977,89 +979,14 @@ class CameraNode:
 
                 # === Build Viz Frame based on selected mode ===
                 viz_frame = frame_to_process.copy()
-                if self._viz_mode == 'PRONG_A':
-                    if self._last_is_canny_diff and self.permanent_bg_frame is not None:
-                        # ── PIXEL DIFF THERMAL  +  CANNY EDGE OUTLINE OVERLAY ──────────────
-                        #
-                        #  Layer 1 (base):  Pixel-diff thermal map
-                        #    - absdiff(equalised current, equalised bg) → COLORMAP_JET
-                        #    - BLUE  = low pixel change = background
-                        #    - GREEN = moderate change
-                        #    - RED   = large pixel change = intruder present
-                        #
-                        #  Layer 2 (overlay): Canny edge diff lines
-                        #    - absdiff(Canny(current), Canny(bg)) → white lines
-                        #    - Draws the structural outline / silhouette of the new object
-                        #    - Crisp edges on top of the heat give precise shape info
-                        #
-
-                        # \u2500\u2500 Layer 1: Pixel-diff thermal \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-                        gray_curr = cv2.cvtColor(frame_to_process, cv2.COLOR_BGR2GRAY)
-                        curr_eq   = cv2.equalizeHist(gray_curr)
-                        bg_eq     = cv2.equalizeHist(self.permanent_bg_frame)
-                        pix_diff  = cv2.absdiff(curr_eq, bg_eq)
-                        # Amplify: background should be a solid deep blue, not grey-blue
-                        pix_diff  = cv2.convertScaleAbs(pix_diff, alpha=2.4, beta=0)
-                        thermal   = cv2.applyColorMap(pix_diff, cv2.COLORMAP_JET)
-                        viz_frame = thermal  # full thermal as base
-
-                        # \u2500\u2500 Layer 2: Canny edge diff outline \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-                        if self._last_edge_diff is not None:
-                            # Threshold the edge diff to get clean binary edges
-                            _, edge_bin = cv2.threshold(
-                                self._last_edge_diff, 20, 255, cv2.THRESH_BINARY)
-                            # Dilate slightly so thin edge lines are clearly visible
-                            edge_bin = cv2.dilate(
-                                edge_bin, np.ones((2, 2), np.uint8), iterations=1)
-                            # Paint edge pixels bright white on the thermal base
-                            viz_frame[edge_bin > 0] = (255, 255, 255)
-
-                        # \u2500\u2500 Confirmed blob contours (dashed cyan) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-                        if motion_mask is not None:
-                            contours_viz, _ = cv2.findContours(
-                                motion_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                            cv2.drawContours(viz_frame, contours_viz, -1, (0, 255, 255), 2)
-
-                        # Labels
-                        cv2.putText(viz_frame, 'PRONG A  |  PIXEL DIFF + CANNY EDGES',
-                                    (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.50,
-                                    (255, 255, 255), 1, cv2.LINE_AA)
-                        cv2.putText(viz_frame, 'BLUE=BG   RED=INTRUDER   WHITE=EDGES   CYAN=BLOB',
-                                    (8, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.38,
-                                    (200, 200, 200), 1, cv2.LINE_AA)
-
-                    else:
-                        # ── MOG2 FALLBACK (no captured background) ───────────────────────
-                        # Show MOG2 motion mask as a dim thermal look + big warning
-                        if self._last_edge_diff is not None:
-                            thermal_mog = cv2.applyColorMap(self._last_edge_diff, cv2.COLORMAP_JET)
-                            viz_frame = cv2.addWeighted(frame_to_process, 0.55, thermal_mog, 0.45, 0)
-                        # Red warning bar
-                        warn_ov = viz_frame.copy()
-                        cv2.rectangle(warn_ov, (0, 0), (viz_frame.shape[1], 72), (0, 0, 160), -1)
-                        viz_frame = cv2.addWeighted(warn_ov, 0.35, viz_frame, 0.65, 0)
-                        cv2.putText(viz_frame, '! CAPTURE BACKGROUND TO ENABLE THERMAL DIFF',
-                                    (8, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (80, 80, 255), 2, cv2.LINE_AA)
-                        cv2.putText(viz_frame, 'CURRENTLY SHOWING MOG2 MOTION MASK',
-                                    (8, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (150, 150, 255), 1, cv2.LINE_AA)
-
-                elif self._viz_mode == 'PRONG_B':
-                    # Draw raw YOLO detections (before intersection filter)
-                    for det in yolo_detections:
-                        cv2.rectangle(viz_frame, (det.x, det.y), (det.x+det.w, det.y+det.h), (255, 165, 0), 1)
-                        cv2.putText(viz_frame, f'{det.class_name} {det.confidence:.2f}',
-                                    (det.x, det.y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 165, 0), 1)
-                    cv2.putText(viz_frame, 'PRONG B: RAW YOLO', (8, 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 1, cv2.LINE_AA)
-                else:
-                    # COMBINED: draw intersection-validated boxes
-                    for det in detections:
-                        x1, y1 = det.x, det.y
-                        x2, y2 = det.x + det.w, det.y + det.h
-                        color = (0, 0, 255) if det.class_name in ["Weapon"] else (0, 255, 255)
-                        cv2.rectangle(viz_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-                        cv2.putText(viz_frame, f"{det.class_name} {det.confidence:.2f}",
-                                    (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+                # COMBINED: draw intersection-validated boxes
+                for det in detections:
+                    x1, y1 = det.x, det.y
+                    x2, y2 = det.x + det.w, det.y + det.h
+                    color = (0, 0, 255) if det.class_name in ["Weapon"] else (0, 255, 255)
+                    cv2.rectangle(viz_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                    cv2.putText(viz_frame, f"{det.class_name} {det.confidence:.2f}",
+                                (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
 
                 with self._det_lock:
                     self._latest_detections = detections
@@ -1068,6 +995,10 @@ class CameraNode:
                 self._last_inference_ts = time.time()
                 self._last_inference_ms = (time.perf_counter() - _cycle_start) * 1000
                 self._inference_cycle_count += 1
+
+                # If we detected an object here and ALARM_TRIGGER_TYPE is DETECTION, trigger it now.
+                if self.alarm_trigger_type == "DETECTION" and len(detections) > 0:
+                     self.system.trigger_instant_alarm(self.node_id, detections, from_inference=True)
 
             except Exception as e:
                 _log_exception(self.node_id, e, context="inference_loop")
@@ -1315,10 +1246,11 @@ class CameraNode:
                 self._human_detected_this_session = False
                 
                 # Instant Alarm: The moment the PIR connects the stream, we trigger the alarm.
-                from detection_engine import Detection
-                fake_det = Detection(x=0, y=0, w=0, h=0, confidence=1.0, class_name="PIR Trigger", source="system", keypoints=None, metadata={})
-                self.system.trigger_instant_alarm(self.node_id, [fake_det])
-                print(f"[{self.node_id}] STREAM CONNECTED! PIR Instant alarm triggered.")
+                if self.alarm_trigger_type == "PIR":
+                    from detection_engine import Detection
+                    fake_det = Detection(x=0, y=0, w=0, h=0, confidence=1.0, class_name="PIR Trigger", source="system", keypoints=None, metadata={})
+                    self.system.trigger_instant_alarm(self.node_id, [fake_det])
+                    print(f"[{self.node_id}] STREAM CONNECTED! PIR Instant alarm triggered.")
 
             self.online = True
             
@@ -1415,9 +1347,6 @@ class CameraNode:
             "clips_saved": self.clips_saved,
         }
 
-    def stop(self):
-        self._stopped = True
-        self.online = False
 
 
 # ===========================
@@ -1479,8 +1408,8 @@ class HashtagSystem:
             self._add_node(nid, url, name=nd.get("name", nid),
                            lat=nd.get("lat", 0.0), lng=nd.get("lng", 0.0))
 
-    def _add_node(self, node_id: str, stream_url: Any, name="", lat=0.0, lng=0.0) -> CameraNode:
-        node = CameraNode(node_id, stream_url, self, self.engine, self.degrader, name=name, lat=lat, lng=lng)
+    def _add_node(self, node_id: str, stream_url: Any, name="", lat=0.0, lng=0.0, alarm_trigger_type="PIR") -> CameraNode:
+        node = CameraNode(node_id, stream_url, self, self.engine, self.degrader, name=name, lat=lat, lng=lng, alarm_trigger_type=alarm_trigger_type)
         node.start()
         self.nodes[node_id] = node
         return node
@@ -1494,16 +1423,17 @@ class HashtagSystem:
                 "stream_url": n.stream_url,
                 "lat": n.lat,
                 "lng": n.lng,
+                "alarm_trigger_type": getattr(n, "alarm_trigger_type", "PIR")
             }
             for nid, n in self.nodes.items()
         ]
 
-    def add_node(self, node_id: str, stream_url: Any, name="", lat=0.0, lng=0.0) -> CameraNode:
+    def add_node(self, node_id: str, stream_url: Any, name="", lat=0.0, lng=0.0, alarm_trigger_type="PIR") -> CameraNode:
         if isinstance(stream_url, int) or (isinstance(stream_url, str) and stream_url.strip().isdigit()):
             raise ValueError(f"Integer device IDs are blocked. Provide an HTTP or GST URL.")
         if node_id in self.nodes:
             self.nodes[node_id].stop()
-        node = self._add_node(node_id, stream_url, name, lat, lng)
+        node = self._add_node(node_id, stream_url, name, lat, lng, alarm_trigger_type)
         _save_nodes_to_disk(self._nodes_as_list())
         self._log_event("NODE_ADDED", f"Node {node_id} ({name}) added at {stream_url}")
         return node
@@ -1547,6 +1477,8 @@ class HashtagSystem:
             node._stopped = False
             node._capture_thread = threading.Thread(target=node._capture_loop, daemon=True)
             node._capture_thread.start()
+            node._inference_thread = threading.Thread(target=node._inference_loop, daemon=True)
+            node._inference_thread.start()
             changes.append(f"stream_url: {new_url}")
 
         if "lat" in kwargs:
@@ -1555,6 +1487,11 @@ class HashtagSystem:
         if "lng" in kwargs:
             node.lng = float(kwargs["lng"])
             changes.append(f"lng: {node.lng}")
+        if "alarm_trigger_type" in kwargs:
+            node.alarm_trigger_type = str(kwargs["alarm_trigger_type"]).strip().upper()
+            if node.alarm_trigger_type not in ["PIR", "DETECTION"]:
+                node.alarm_trigger_type = "PIR"
+            changes.append(f"alarm_trigger_type: {node.alarm_trigger_type}")
 
         _save_nodes_to_disk(self._nodes_as_list())
         msg = f"Node {node_id} updated: {', '.join(changes)}"
@@ -1696,7 +1633,8 @@ class HashtagSystem:
             frame = node.get_raw_frame()
             if frame is not None:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                node.permanent_bg_edges = cv2.Canny(gray, 50, 150)
+                cfg = self.get_node_config(node_id)
+                node.permanent_bg_edges = cv2.Canny(gray, cfg.canny_low, cfg.canny_high)
                 node.permanent_bg_frame = gray.copy()          # store raw gray for thermal diff viz
                 node._bg_capture_mean_brightness = float(np.mean(gray))
                 node._bg_invalidation_strike = 0               # reset strike counter
@@ -1707,10 +1645,11 @@ class HashtagSystem:
     def clear_permanent_background(self, node_id: str):
         """Reset a node's permanent background, reverting to MOG2 motion detection."""
         if node_id in self.nodes:
-            self.nodes[node_id].permanent_bg_edges = None
-            self.nodes[node_id].permanent_bg_frame = None
-            self.nodes[node_id]._bg_capture_mean_brightness = None
-            self.nodes[node_id]._bg_invalidation_strike = 0
+            node = self.nodes[node_id]
+            node.permanent_bg_edges = None
+            node.permanent_bg_frame = None
+            node._bg_capture_mean_brightness = None
+            node._bg_invalidation_strike = 0
             _delete_bg_from_disk(node_id)  # remove persisted files
             print(f"[ADMIN] Cleared permanent background for {node_id} — disk files removed")
 
@@ -1737,7 +1676,7 @@ class HashtagSystem:
         ).start()
         print(f"[ANALYZE] {node_id} | Auto Job {job_id[:8]} queued | File: {mp4_path}")
 
-    def trigger_instant_alarm(self, node_id: str, detections: List[Any]):
+    def trigger_instant_alarm(self, node_id: str, detections: List[Any], from_inference=False):
         job_id = f"INSTANT-{uuid.uuid4().hex[:8]}"
         job = AnalysisJob(job_id, node_id, [])
         job.is_auto_trigger = True
@@ -1769,12 +1708,18 @@ class HashtagSystem:
         # Increment per-node unacknowledged threat count
         node = self.nodes.get(node_id)
         if node:
-            node._active_threat_count += 1
+            if not from_inference and node.alarm_trigger_type == "DETECTION":
+                # Do not alarm yet. Wait for inference thread to verify threat and call trigger_instant_alarm(..., from_inference=True)
+                return
 
-        now = time.time()
-        if now - self._last_buzzer > BUZZER_COOLDOWN_SEC:
-            self._last_buzzer = now
-            _play_buzzer(4)
+            with node._threat_count_lock:
+                node._active_threat_count += 1
+            
+            # Sound alarm if cooldown expired
+            now = time.time()
+            if now - self._last_buzzer > BUZZER_COOLDOWN_SEC:
+                self._last_buzzer = now
+                _play_buzzer(4)
 
         self._log_event("INSTANT_ALARM", f"{node_id}: {len(entities)} entities detected instantly (queue={node._active_threat_count if node else '?'})", threat_level=4)
 
@@ -2245,9 +2190,12 @@ class HashtagSystem:
 
 # Singleton
 _system: Optional[HashtagSystem] = None
+_system_lock = threading.Lock()
 
 def get_system() -> HashtagSystem:
     global _system
     if _system is None:
-        _system = HashtagSystem()
+        with _system_lock:
+            if _system is None:
+                _system = HashtagSystem()
     return _system

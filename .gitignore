@@ -21,3 +21,4 @@ dependencies.lock
 venv/
 node_modules/
 .env
+.venv/

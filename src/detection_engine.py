@@ -171,7 +171,10 @@ def hierarchical_nms(detections: List[Detection],
                 suppress = True
                 # Absorb keypoints into the dominant box if missing
                 if k.keypoints is None and det.keypoints is not None:
-                    k.keypoints = det.keypoints
+                    import copy
+                    k_copy = copy.copy(k)
+                    k_copy.keypoints = copy.deepcopy(det.keypoints)
+                    keep[keep.index(k)] = k_copy
                 break
 
         if not suppress:
@@ -423,12 +426,11 @@ class DetectionEngine:
         h, w = frame.shape[:2]
         conf = person_conf_override if person_conf_override is not None else self.person_conf
 
-        with self._inference_lock:
-            # === STAGE 1: YOLO Person Detection ===
-            if active_boxes is None:
-                active_boxes = self.last_boxes.get(cam_id, [])
+        # === STAGE 1: YOLO Person Detection ===
+        if active_boxes is None:
+            active_boxes = self.last_boxes.get(cam_id, [])
 
-            verified = self._detect_persons(frame, active_boxes, motion_mask, conf)
+        verified = self._detect_persons(frame, active_boxes, motion_mask, conf)
             if not verified:
                 self.last_boxes[cam_id] = []
                 return []
@@ -447,11 +449,11 @@ class DetectionEngine:
 
             verified.extend(valid_weapons)
 
-            # === STAGE 3: Hierarchical NMS — 1 box per entity ===
-            final = hierarchical_nms(verified, iou_thresh=0.25, containment_thresh=0.40)
+        # === STAGE 3: Hierarchical NMS — 1 box per entity ===
+        final = hierarchical_nms(verified, iou_thresh=0.25, containment_thresh=0.40)
 
-            self.last_boxes[cam_id] = [d.bbox for d in final]
-            return final
+        self.last_boxes[cam_id] = [d.bbox for d in final]
+        return final
 
     def _detect_persons(self, frame: np.ndarray, active_boxes: List[Tuple] = None,
                         motion_mask: np.ndarray = None,
@@ -467,15 +469,16 @@ class DetectionEngine:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         frame_for_inference = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
-        results = self._person_model(
-            frame_for_inference,
-            classes=[0, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
-            conf=conf,
-            device=self.device,
-            verbose=False,
-            imgsz=self.img_size,
-            half=(self.device != "cpu")
-        )
+        with self._inference_lock:
+            results = self._person_model(
+                frame_for_inference,
+                classes=[0, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+                conf=conf,
+                device=self.device,
+                verbose=False,
+                imgsz=self.img_size,
+                half=(self.device != "cpu")
+            )
 
         verified = []
         frame_h, frame_w = frame.shape[:2]
@@ -551,15 +554,16 @@ class DetectionEngine:
         Classes: 43=knife, 76=scissors (as blade proxy).
         """
         try:
-            results = self._person_model(
-                frame,
-                classes=list(self.WEAPON_CLASSES.keys()),
-                conf=self.weapon_conf,
-                device=self.device,
-                verbose=False,
-                imgsz=self.img_size,
-                half=(self.device != "cpu")
-            )
+            with self._inference_lock:
+                results = self._person_model(
+                    frame,
+                    classes=list(self.WEAPON_CLASSES.keys()),
+                    conf=self.weapon_conf,
+                    device=self.device,
+                    verbose=False,
+                    imgsz=self.img_size,
+                    half=(self.device != "cpu")
+                )
             dets = []
             for b in results[0].boxes.data.cpu().numpy():
                 x1, y1, x2, y2, conf, cls_id = b[:6]

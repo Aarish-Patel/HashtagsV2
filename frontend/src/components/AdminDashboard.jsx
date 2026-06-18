@@ -106,6 +106,14 @@ function NodeCard({ node, onUpdate, onDelete, onSelect, isSelected }) {
           {field('lat', node.lat ?? 0, 'LAT', 'number')}
           {field('lng', node.lng ?? 0, 'LNG', 'number')}
         </div>
+        <div className="flex items-center gap-2 mt-1">
+            <span className="text-[9px] font-bold text-slate-600 uppercase tracking-wider w-10 shrink-0">TRIGGER</span>
+            <select value={node.alarm_trigger_type || 'PIR'} onChange={e => onUpdate('alarm_trigger_type', e.target.value)}
+              className="bg-[#0F172A] border border-slate-700 rounded px-1 py-0.5 text-white text-[10px] focus:outline-none">
+              <option value="PIR">PIR (Instant)</option>
+              <option value="DETECTION">DETECTION</option>
+            </select>
+        </div>
       </div>
       {/* Status badges */}
       <div className="flex gap-1.5 mt-2 flex-wrap">
@@ -148,6 +156,16 @@ function AddNodeForm({ onAdd, onCancel }) {
           />
         </div>
       ))}
+      <div className="mb-2">
+        <label className="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+          Alarm Trigger Type
+        </label>
+        <select value={form.alarm_trigger_type || 'PIR'} onChange={e => set('alarm_trigger_type', e.target.value)}
+          className="w-full bg-[#0F172A] border border-slate-700 rounded p-2 text-white text-xs focus:border-[#00F5FF] focus:outline-none font-mono">
+          <option value="PIR">PIR (Instant on Stream Connect)</option>
+          <option value="DETECTION">DETECTION (Wait for Inference)</option>
+        </select>
+      </div>
       <div className="flex gap-2 mt-1">
         <button onClick={() => onAdd(form)} disabled={!valid}
           className="flex-1 bg-[#00F5FF]/10 hover:bg-[#00F5FF]/20 border border-[#00F5FF]/50 text-[#00F5FF] font-bold py-2 rounded text-xs disabled:opacity-30">
@@ -466,7 +484,7 @@ export default function AdminDashboard() {
               </div>
             )}
 
-            <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-3 overflow-y-auto max-h-[75vh] pr-2 custom-scrollbar">
               {nodes.length === 0 && (
                 <div className="text-slate-600 text-xs text-center py-4 font-mono">No nodes loaded yet...</div>
               )}
@@ -491,7 +509,6 @@ export default function AdminDashboard() {
               <>
                 <div className="absolute top-3 right-3 z-10 bg-black/50 backdrop-blur border border-white/10 px-3 py-1.5 rounded flex flex-col items-end pointer-events-none">
                   <span className="text-white font-black tracking-widest text-sm">{selectedNodeInfo?.name || selectedNode}</span>
-                  <span className="text-[#00F5FF] font-mono text-[10px]">VIZ: {vizMode}</span>
                   {selectedNodeInfo && (
                     <span className="text-slate-400 font-mono text-[9px] mt-1">
                       {selectedNodeInfo.fps?.toFixed(1)} FPS | {selectedNodeInfo.has_permanent_bg ? 'CANNY-BG' : 'MOG2'}
@@ -515,23 +532,6 @@ export default function AdminDashboard() {
             ) : (
               <div className="text-slate-700 font-mono tracking-widest uppercase text-sm">Select a Node</div>
             )}
-          </div>
-
-          {/* Viz Mode */}
-          <div className="bg-[#030B17] border border-slate-800 rounded-xl p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <Eye size={13} className="text-[#00F5FF]" />
-              <h3 className="text-xs font-bold text-[#00F5FF] uppercase tracking-widest">Detection View</h3>
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              {vizModes.map(v => (
-                <button key={v.id} onClick={() => handleSetVizMode(v.id)} disabled={!selectedNode}
-                  className={`text-left px-3 py-2 rounded-lg border text-xs font-bold transition-all disabled:opacity-40 ${vizMode === v.id ? 'border-[#00F5FF] bg-[#00F5FF]/10 text-[#00F5FF]' : 'border-slate-700 bg-slate-900/30 text-slate-400 hover:border-slate-500'}`}>
-                  <span className="block">{v.label}</span>
-                  <span className="block text-[9px] font-normal text-slate-500 mt-0.5">{v.desc}</span>
-                </button>
-              ))}
-            </div>
           </div>
 
           {/* Tuning */}

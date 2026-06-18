@@ -21,6 +21,9 @@ To run this system, you must install the following software. Please ensure you c
    - Required ONLY if you are using TCP raw GStreamer pipelines (like `rawgst:...` in your `nodes.json`).
    - You must add the `\bin` folder of GStreamer to your Windows environment PATH variables so the `gst-launch-1.0` command works.
 
+4. **Internet Connection (First Run Only)**
+   - The system uses Ultralytics YOLOv8. The `yolov8n.pt` model weights (approx 6.5MB) will be downloaded automatically from the internet on the first run. Ensure you are connected to the internet.
+
 ## Quick Start (Instantly Run)
 
 Simply double-click the **`start_hashtag.bat`** file on Windows.

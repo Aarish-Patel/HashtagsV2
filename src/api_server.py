@@ -36,18 +36,13 @@ CORS(app)
 # MJPEG frame generator helpers
 # ───────────────────────────────────────────────────────────
 
-STATIC_NO_SIGNAL = None
-
 def _no_signal_frame(w=800, h=640):
-    global STATIC_NO_SIGNAL
-    if STATIC_NO_SIGNAL is None:
-        img = 5 * (1 + int(time.time() * 2) % 2)  # subtle flicker
-        frame = (5 + img) * __import__("numpy").ones((h, w, 3), dtype="uint8")
-        cv2.putText(frame, "NO SIGNAL", (w//2 - 80, h//2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (60, 60, 60), 2)
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        STATIC_NO_SIGNAL = buf.tobytes() if ok else b""
-    return STATIC_NO_SIGNAL
+    img = 5 * (1 + int(time.time() * 2) % 2)  # subtle flicker
+    frame = (5 + img) * __import__("numpy").ones((h, w, 3), dtype="uint8")
+    cv2.putText(frame, "NO SIGNAL", (w//2 - 80, h//2),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (60, 60, 60), 2)
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    return buf.tobytes() if ok else b""
 
 
 def _encode_frame(frame, quality=75):
@@ -162,6 +157,16 @@ def require_role(required_role):
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
+            token = request.headers.get("Authorization", "").replace("Bearer ", "")
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+                role_order = {"OPERATOR": 1, "COMMANDER": 2}
+                if role_order.get(payload.get("role"), 0) < role_order.get(required_role, 99):
+                    return jsonify({"error": "Insufficient privileges"}), 403
+            except jwt.ExpiredSignatureError:
+                return jsonify({"error": "Token expired"}), 401
+            except Exception:
+                return jsonify({"error": "Invalid token"}), 401
             return f(*args, **kwargs)
         return decorated_function
     return decorator
@@ -346,8 +351,14 @@ def serve_clip(filename):
     # Security: resolve and ensure path stays inside CLIPS_DIR
     safe_path = os.path.realpath(os.path.join(CLIPS_DIR, filename))
     clips_real = os.path.realpath(CLIPS_DIR)
-    if not safe_path.startswith(clips_real + os.sep) and safe_path != clips_real:
+    
+    try:
+        common = os.path.commonpath([safe_path, clips_real])
+        if common != clips_real:
+            abort(403)
+    except ValueError:
         abort(403)
+        
     if not os.path.exists(safe_path):
         abort(404)
     directory = os.path.dirname(safe_path)
@@ -431,13 +442,16 @@ def add_node():
     name = data.get("name", "")
     lat  = float(data.get("lat", 0.0) or 0.0)
     lng  = float(data.get("lng", 0.0) or 0.0)
+    alarm_trigger_type = str(data.get("alarm_trigger_type", "PIR")).strip().upper()
+    if alarm_trigger_type not in ["PIR", "DETECTION"]:
+        alarm_trigger_type = "PIR"
 
     if not node_id or not stream_url:
         return jsonify({"error": "id and stream_url required"}), 400
 
     sys_obj = get_system()
     try:
-        sys_obj.add_node(node_id, stream_url, name=name, lat=lat, lng=lng)
+        sys_obj.add_node(node_id, stream_url, name=name, lat=lat, lng=lng, alarm_trigger_type=alarm_trigger_type)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     return jsonify({"status": "ok", "node_id": node_id})
@@ -448,11 +462,11 @@ def add_node():
 def update_node(node_id):
     """
     Partially update a node. Accepts any combination of:
-      name, stream_url, lat, lng
+      name, stream_url, lat, lng, alarm_trigger_type
     Changes are applied live (stream_url restarts capture) and persisted to nodes.json.
     """
     data = request.get_json() or {}
-    allowed = {"name", "stream_url", "lat", "lng"}
+    allowed = {"name", "stream_url", "lat", "lng", "alarm_trigger_type"}
     kwargs = {k: v for k, v in data.items() if k in allowed}
     if not kwargs:
         return jsonify({"error": "No valid fields provided. Allowed: name, stream_url, lat, lng"}), 400
