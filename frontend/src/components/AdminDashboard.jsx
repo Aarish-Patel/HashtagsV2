@@ -208,7 +208,7 @@ export default function AdminDashboard() {
   // ── Polling ─────────────────────────────────────────────────────────────────
   const refreshNodes = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/nodes`);
+      const res = await fetch(`${API_BASE}/api/nodes?t=${Date.now()}`);
       if (!res.ok) return;
       setNodes(await res.json());
     } catch (e) {}

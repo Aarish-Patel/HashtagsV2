@@ -6,5 +6,29 @@
     "lat": 24.165,
     "lng": 94.259,
     "alarm_trigger_type": "PIR"
+  },
+  {
+    "id": "HASH-1781859614073",
+    "name": "Yellow IMX462 Node",
+    "stream_url": "gst:\"D:\\Coding\\msvc_x86_64\\bin\\gst-launch-1.0.exe\" -q tcpclientsrc host=192.168.0.7 port=5000 ! gdpdepay ! rtph264depay ! avdec_h264 ! videoconvert ! queue max-size-buffers=2 leaky=downstream ! jpegenc idct-method=1 quality=75 ! fdsink fd=1",
+    "lat": 24.17,
+    "lng": 94.26,
+    "alarm_trigger_type": "DETECTION"
+  },
+  {
+    "id": "HASH-1781860480020",
+    "name": "Heltec 1",
+    "stream_url": "http://192.168.0.201:81/stream",
+    "lat": 24.15,
+    "lng": 94.24,
+    "alarm_trigger_type": "DETECTION"
+  },
+  {
+    "id": "HASH-1781860505256",
+    "name": "Heltec 2",
+    "stream_url": "http://192.168.0.202:81/stream",
+    "lat": 24.14,
+    "lng": 94.243,
+    "alarm_trigger_type": "DETECTION"
   }
 ]

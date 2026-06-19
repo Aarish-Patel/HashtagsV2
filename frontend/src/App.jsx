@@ -87,6 +87,7 @@ export default function App() {
         has_permanent_bg: n.has_permanent_bg,
         viz_mode: n.viz_mode,
         config: n.config,
+        alarm_trigger_type: n.alarm_trigger_type,
         // Legacy field aliases for older components
         ip: n.stream_url,
       })));
@@ -132,7 +133,7 @@ export default function App() {
   // ── Fetch system status (sensors, events) ───────────────────
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/status`);
+      const res = await fetch(`${API_BASE}/api/status?t=${Date.now()}`);
       const data = await res.json();
       setSensors(data.sensors || []);
       setSystem(prev => ({ ...prev, ...data.system }));
@@ -142,7 +143,7 @@ export default function App() {
         fps: s.online ? (s.fps || 5) : 0,
       })));
 
-      const evtRes = await fetch(`${API_BASE}/api/events?limit=200`);
+      const evtRes = await fetch(`${API_BASE}/api/events?limit=200&t=${Date.now()}`);
       const evtData = await evtRes.json();
       const parsedLogs = evtData.slice(0, 60).map(e => ({
         time: `[${e.ts_str || '??:??:??'}]`,
@@ -157,7 +158,7 @@ export default function App() {
 
   const fetchIncidents = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/clips`);
+      const res = await fetch(`${API_BASE}/api/clips?t=${Date.now()}`);
       if (res.ok) setIncidents(await res.json());
     } catch (e) {}
   }, []);
@@ -421,9 +422,6 @@ export default function App() {
   }, [clearTimer]);
 
   const dismissThreat = useCallback(async (nodeId) => {
-    // Stop the alarm immediately
-    stopBrowserBuzzer();
-    
     // If called from an onClick the argument is a React SyntheticEvent — ignore it
     if (nodeId && typeof nodeId === 'object') nodeId = undefined;
 
@@ -431,18 +429,38 @@ export default function App() {
     // even before the backend responds.
     acknowledgedAtRef.current = Date.now();
 
-    // Optimistically clear the UI so the user sees instant feedback
-    setActiveThreatNodes([]);
-    setMode(MODE.STANDBY);
-    setAnalysisJobs([]);
-    setThreatEntities([]);
-    setReplayUrls({});
-
     // Collect all node IDs that need to be acknowledged on the backend
     const nodesToAck = new Set();
-    if (nodeId) nodesToAck.add(nodeId);
-    activeThreatNodes.forEach(t => nodesToAck.add(t.node_id));
-    threatEntities.forEach(t => { if (t.camera) nodesToAck.add(t.camera); });
+    
+    if (nodeId) {
+      nodesToAck.add(nodeId);
+      
+      // Optimistically clear ONLY this node from the UI
+      setActiveThreatNodes(prev => {
+        const next = prev.filter(t => t.node_id !== nodeId);
+        if (next.length === 0) {
+          stopBrowserBuzzer();
+          setMode(MODE.STANDBY);
+          setReplayUrls({});
+        }
+        return next;
+      });
+      setAnalysisJobs(prev => prev.filter(j => j.node_id !== nodeId));
+      setThreatEntities(prev => prev.filter(t => t.camera !== nodeId));
+    } else {
+      activeThreatNodes.forEach(t => nodesToAck.add(t.node_id));
+      threatEntities.forEach(t => { if (t.camera) nodesToAck.add(t.camera); });
+      
+      // Stop the alarm immediately
+      stopBrowserBuzzer();
+      
+      // Optimistically clear the UI entirely
+      setActiveThreatNodes([]);
+      setMode(MODE.STANDBY);
+      setAnalysisJobs([]);
+      setThreatEntities([]);
+      setReplayUrls({});
+    }
     
     if (nodesToAck.size > 0) {
       // Helper: attempt one acknowledge POST.

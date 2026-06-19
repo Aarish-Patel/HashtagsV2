@@ -164,7 +164,7 @@ const NodeManager = ({ nodes, setNodes }) => {
       name: formData.name,
       lat: parseFloat(formData.lat),
       lng: parseFloat(formData.lng),
-      stream_url: formData.ip.startsWith('http') || formData.ip.startsWith('raw') || formData.ip.startsWith('tcp') || formData.ip.includes('!') ? formData.ip : `http://${formData.ip}/stream`,
+      stream_url: (formData.ip.startsWith('http') || formData.ip.startsWith('raw') || formData.ip.startsWith('tcp') || formData.ip.includes('!')) ? formData.ip.replace(/`/g, '').trim() : `http://${formData.ip}/stream`,
       alarm_trigger_type: formData.alarm_trigger_type || 'PIR'
     };
 

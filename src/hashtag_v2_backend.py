@@ -1053,25 +1053,18 @@ class CameraNode:
                 if len(detections) > 0:
                     self._last_detection_ts = time.time()
                 
-                # A threat is only considered "cleared" if no detections occurred for 30 seconds.
-                # 30s prevents rapid false-positive loops where brief gaps between detections
-                # re-arm the alarm and immediately fire again.
-                time_since_last_det = time.time() - getattr(self, '_last_detection_ts', 0)
-                if time_since_last_det > 30.0:
-                    self._threat_cleared_since_last_alarm = True
-                
+                print(f"[{self.node_id}] DEBUG: alarm_trigger_type={self.alarm_trigger_type} len(detections)={len(detections)} viz_mode={getattr(self, '_viz_mode', 'COMBINED')}")
                 if self.alarm_trigger_type == "DETECTION" and len(detections) > 0:
                     with self._threat_count_lock:
                         already_alarming = self._active_threat_count > 0
                     
                     # Ensure node has been online for at least 5 seconds to prevent
                     # connection artifacts from causing false alarms
-                    warmup_clear = time.time() - getattr(self, '_session_start_time', 0) > 5.0
+                    warmup_clear = time.time() - getattr(self, '_session_start_time', 0) > 0.5
+                    time_since_last_ack = time.time() - getattr(self, '_last_ack_ts', 0)
                     
-                    cleared = getattr(self, '_threat_cleared_since_last_alarm', True)
-                    if not already_alarming and cleared and warmup_clear:
-                         self._threat_cleared_since_last_alarm = False
-                         self.system.trigger_instant_alarm(self.node_id, detections, from_inference=True)
+                    if not already_alarming and warmup_clear and time_since_last_ack > 2.0:
+                          self.system.trigger_instant_alarm(self.node_id, detections, from_inference=True)
 
             except Exception as e:
                 _log_exception(self.node_id, e, context="inference_loop")
@@ -1103,7 +1096,7 @@ class CameraNode:
                 pass # let cv2 handle it or fail in the loop
         
         cap = None
-        if is_video_file or (isinstance(src, int)):
+        if is_video_file or isinstance(src, int):
             cap = cv2.VideoCapture(src)
             if not is_video_file:
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -1181,7 +1174,7 @@ class CameraNode:
                 continue
 
             # Check manual timeout for hung stream
-            if not is_video_file and (time.time() - last_frame_time > 5.0):
+            if not is_video_file and (time.time() - last_frame_time > 0.5):
                 print(f"[DEBUG-CAPTURE] [{self.node_id}] Stream HUNG! No frames for 5 seconds. Forcing disconnect.")
                 is_open = False
                 if hasattr(self, '_stream') and self._stream:
@@ -1320,6 +1313,7 @@ class CameraNode:
             # A valid frame was received
             if not self._was_online:
                 self._was_online = True
+                self._session_start_time = time.time()
                 self.threat_detected_this_session = True
                 self._had_large_discrepancy = False
                 self._human_detected_this_session = False
@@ -1813,6 +1807,9 @@ class HashtagSystem:
                 # Do not alarm yet. Wait for inference thread to verify threat and call trigger_instant_alarm(..., from_inference=True)
                 return
 
+            if time.time() - getattr(node, "_last_ack_ts", 0) < 2.0:
+                return
+
             with node._threat_count_lock:
                 node._active_threat_count += 1
             
@@ -1837,6 +1834,7 @@ class HashtagSystem:
         now = time.time()
         node._active_threat_count = 0
         node._last_acknowledged_ts = now
+        node._last_ack_ts = now
         node.threat_detected_this_session = False
 
         # Re-arm debounce: DETECTION nodes need 5s of clean frames before
