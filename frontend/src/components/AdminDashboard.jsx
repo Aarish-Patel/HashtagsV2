@@ -657,6 +657,11 @@ export default function AdminDashboard() {
               <AlertTriangle className="w-4 h-4" /> Simulate Threat
             </button>
 
+            <button onClick={() => { if(window.confirm('PERMANENTLY DELETE THIS NODE? This will archive all its clips and remove it from the system.')) handleDeleteNode(selectedNode); }} disabled={!selectedNode || loading}
+              className="flex items-center justify-center gap-2 w-full bg-red-900/30 hover:bg-red-800/50 border border-red-700/50 text-red-400 font-bold py-2 px-3 rounded text-xs mt-4 disabled:opacity-50">
+              <Trash2 size={13} /> PERMANENTLY DELETE NODE
+            </button>
+
             {message && (
               <div className={`p-3 bg-slate-800 border text-xs rounded text-center font-mono ${msgStyle[messageType]}`}>
                 {message}
