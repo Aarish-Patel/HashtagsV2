@@ -993,7 +993,17 @@ class CameraNode:
                             }
                         ))
 
-                detections = final_detections
+                if self._viz_mode == "PRONG_A":
+                    detections = [Detection(
+                        x=b[0], y=b[1], w=b[2], h=b[3],
+                        confidence=1.0, class_name="Motion", source="prong_a",
+                        keypoints=None, metadata={"prong_a_blob_area": b[2]*b[3]}
+                    ) for b in motion_boxes]
+                elif self._viz_mode == "PRONG_B":
+                    detections = yolo_detections
+                else:
+                    detections = final_detections
+                    
                 self._last_intersection_pass = len(final_detections)
 
                 # Record detection history snapshot for debug panel
