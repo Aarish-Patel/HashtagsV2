@@ -1108,7 +1108,7 @@ class CameraNode:
             is_open = True
             if cap is not None:
                 is_open = cap.isOpened()
-            elif isinstance(src, str) and (src.startswith("http") or src.startswith("gst:")):
+            elif isinstance(src, str) and (src.startswith("http") or src.startswith("gst:") or src.startswith("rawgst:")):
                 is_open = hasattr(self, '_stream') and self._stream is not None
 
             if not is_open:
@@ -1328,7 +1328,7 @@ class CameraNode:
                     is_new_session = time_offline > 2.0
                     is_long_cooldown = time_since_last_alarm > 300.0
 
-                    if time_since_last_alarm > 15.0 and (is_new_session or is_long_cooldown):
+                    if is_new_session or (is_long_cooldown and time_since_last_alarm > 15.0):
                         self._last_pir_alarm_ts = now_ts
                         from detection_engine import Detection
                         fake_det = Detection(x=0, y=0, w=0, h=0, confidence=1.0, class_name="PIR Trigger", source="system", keypoints=None, metadata={})
