@@ -38,11 +38,25 @@ const CurrentAlerts = ({ incidents, nodes }) => {
   const [ackedClips, setAckedClips] = useState([]);
 
   // Acknowledge clip
-  const handleAck = (id, e) => {
+  const handleAck = async (id, e, nodeId) => {
     e.stopPropagation();
-    setAckedClips([...ackedClips, id]);
+    setAckedClips(prev => [...prev, id]);
+    if (nodeId) {
+      try {
+        const token = localStorage.getItem('token');
+        const headers = {};
+        if (token && token !== 'null' && token !== 'undefined') {
+          headers['Authorization'] = 'Bearer ' + token;
+        }
+        await fetch(`${API_BASE}/api/admin/acknowledge/${nodeId}`, {
+          method: 'POST',
+          headers
+        });
+      } catch (err) {
+        console.error("Failed to ack node backend", err);
+      }
+    }
   };
-  
   const handleOpenFolder = async () => {
     try {
       await fetch(`${API_BASE}/api/open_clips_folder`, { method: 'POST' });
@@ -60,9 +74,21 @@ const CurrentAlerts = ({ incidents, nodes }) => {
     <div className="flex flex-col mt-4 px-5 mb-4">
       <div className="flex justify-between items-center mb-3 border-b border-white/5 pb-1 opacity-90 gap-2">
          <h3 className="text-[9px] font-black tracking-[0.4em] text-[#00F5FF] uppercase">CURRENT ALERTS</h3>
-         <button onClick={handleOpenFolder} className="text-[7px] bg-[#00F5FF]/10 text-[#00F5FF] border border-[#00F5FF]/30 px-2 py-0.5 hover:bg-[#00F5FF]/20 uppercase font-black transition-colors shrink-0">
-           OPEN SAVED CLIPS
-         </button>
+         <div className="flex gap-2 shrink-0">
+           <button onClick={handleOpenFolder} className="text-[7px] bg-[#00F5FF]/10 text-[#00F5FF] border border-[#00F5FF]/30 px-2 py-0.5 hover:bg-[#00F5FF]/20 uppercase font-black transition-colors">
+             OPEN DIR
+           </button>
+           <button onClick={async () => {
+             if (window.confirm("PERMANENTLY DELETE ALL REPLAYS? This action cannot be undone.")) {
+               try {
+                 await fetch(`${API_BASE}/api/admin/clear_clips`, { method: 'POST' });
+                 setAckedClips(displayClips.map(c => c.clip_file || c.filename || c.id));
+               } catch (e) { console.error(e); }
+             }
+           }} className="text-[7px] bg-[#FF3B3B]/10 text-[#FF3B3B] border border-[#FF3B3B]/30 px-2 py-0.5 hover:bg-[#FF3B3B]/20 uppercase font-black transition-colors">
+             CLEAR CLIPS
+           </button>
+         </div>
       </div>
       <div className="flex flex-col gap-2 max-h-[300px] overflow-y-auto custom-scrollbar pr-1">
         {activeClips.length === 0 && <div className="text-[9px] text-[#94A3B8]/40 font-black tracking-widest uppercase py-4">ALL ALERTS ACKNOWLEDGED</div>}
@@ -104,12 +130,9 @@ const CurrentAlerts = ({ incidents, nodes }) => {
                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${isHighThreat ? 'bg-[#FF3B3B]' : 'bg-[#FFD60A]'}`} />
                </div>
                
-               {/* Hover Overlay with 3 Buttons */}
+               {/* Hover Overlay with 2 Buttons */}
                <div className="absolute inset-0 bg-[#00F5FF]/5 backdrop-blur-sm flex items-center justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-1">
-                 <button className="flex-1 h-full bg-[#030B17] border border-[#00F5FF]/30 text-[#00F5FF] flex items-center justify-center gap-1 text-[7px] font-black uppercase tracking-widest hover:bg-[#00F5FF]/20 transition-colors">
-                   <PlayCircle size={10} /> PLAY
-                 </button>
-                 <button onClick={(e) => handleAck(clipId, e)} className="flex-1 h-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center gap-1 text-[7px] font-black uppercase tracking-widest hover:bg-emerald-500/20 transition-colors">
+                 <button onClick={(e) => handleAck(clipId, e, nodeId)} className="flex-1 h-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center gap-1 text-[7px] font-black uppercase tracking-widest hover:bg-emerald-500/20 transition-colors">
                    <CheckCircle size={10} /> ACK
                  </button>
                  <button className="flex-1 h-full bg-[#FF3B3B]/10 border border-[#FF3B3B]/30 text-[#FF3B3B] flex items-center justify-center gap-1 text-[7px] font-black uppercase tracking-widest hover:bg-[#FF3B3B]/20 transition-colors">
@@ -126,14 +149,39 @@ const CurrentAlerts = ({ incidents, nodes }) => {
 
 const NodeManager = ({ nodes, setNodes }) => {
   const [isEditing, setIsEditing] = useState(false);
-  const [formData, setFormData] = useState({ id: '', name: '', lat: '', lng: '', ip: '' });
+  const [formData, setFormData] = useState({ id: '', name: '', lat: '', lng: '', ip: '', alarm_trigger_type: 'DETECTION' });
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!formData.name || !formData.lat || !formData.lng || !formData.ip) return;
-    if (!formData.id) {
-       setNodes([...nodes, { ...formData, id: `HASH-${nodes.length + 1}`, lat: parseFloat(formData.lat), lng: parseFloat(formData.lng) }]);
-    } else {
-       setNodes(nodes.map(n => n.id === formData.id ? { ...formData, lat: parseFloat(formData.lat), lng: parseFloat(formData.lng) } : n));
+    
+    const isNew = !formData.id;
+    const endpoint = isNew ? `${API_BASE}/api/nodes/add` : `${API_BASE}/api/nodes/${formData.id}`;
+    const method = isNew ? 'POST' : 'PATCH';
+    
+    const payload = {
+      id: formData.id || `HASH-${Date.now()}`,
+      name: formData.name,
+      lat: parseFloat(formData.lat),
+      lng: parseFloat(formData.lng),
+      stream_url: formData.ip.startsWith('http') || formData.ip.startsWith('raw') ? formData.ip : `http://${formData.ip}/stream`,
+      alarm_trigger_type: formData.alarm_trigger_type || 'DETECTION'
+    };
+
+    try {
+      const res = await fetch(endpoint, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        if (isNew) {
+           setNodes([...nodes, payload]);
+        } else {
+           setNodes(nodes.map(n => n.id === formData.id ? { ...n, ...payload } : n));
+        }
+      }
+    } catch (e) {
+      console.error("Failed to save node:", e);
     }
     setIsEditing(false);
   };
@@ -143,7 +191,7 @@ const NodeManager = ({ nodes, setNodes }) => {
       <div className="flex justify-between items-center mb-2 border-b border-white/5 pb-1 opacity-80">
          <h3 className="text-[9px] font-black tracking-[0.3em] text-[#00F5FF] uppercase">HASHTAG NODES</h3>
          {!isEditing && (
-           <button onClick={() => { setFormData({ id: '', name: '', lat: '', lng: '', ip: '' }); setIsEditing(true); }} className="text-[#00F5FF] hover:text-white transition-colors">
+           <button onClick={() => { setFormData({ id: '', name: '', lat: '', lng: '', ip: '', alarm_trigger_type: 'DETECTION' }); setIsEditing(true); }} className="text-[#00F5FF] hover:text-white transition-colors">
              <Plus size={12} />
            </button>
          )}
@@ -155,6 +203,10 @@ const NodeManager = ({ nodes, setNodes }) => {
            <input className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white placeholder-slate-600 outline-none focus:border-[#00F5FF]/50" placeholder="Latitude (e.g. 24.165)" value={formData.lat} onChange={e => setFormData({...formData, lat: e.target.value})} />
            <input className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white placeholder-slate-600 outline-none focus:border-[#00F5FF]/50" placeholder="Longitude (e.g. 94.259)" value={formData.lng} onChange={e => setFormData({...formData, lng: e.target.value})} />
            <input className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white placeholder-slate-600 outline-none focus:border-[#00F5FF]/50" placeholder="Stream IP (e.g. 192.168.1.50)" value={formData.ip} onChange={e => setFormData({...formData, ip: e.target.value})} />
+           <select className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white outline-none focus:border-[#00F5FF]/50" value={formData.alarm_trigger_type || 'DETECTION'} onChange={e => setFormData({...formData, alarm_trigger_type: e.target.value})}>
+             <option value="DETECTION">DETECTION</option>
+             <option value="PIR">PIR</option>
+           </select>
            <div className="flex gap-2 mt-1">
              <button onClick={handleSave} className="flex-1 bg-[#00F5FF]/20 text-[#00F5FF] border border-[#00F5FF]/30 text-[9px] py-1.5 font-black uppercase tracking-widest hover:bg-[#00F5FF]/30 transition-colors">SAVE</button>
              <button onClick={() => setIsEditing(false)} className="flex-1 bg-slate-800 text-slate-400 border border-slate-700 text-[9px] py-1.5 font-black uppercase tracking-widest hover:text-white transition-colors">CANCEL</button>
@@ -167,15 +219,15 @@ const NodeManager = ({ nodes, setNodes }) => {
               <div className="flex justify-between items-center">
                  <div className="flex items-center gap-1.5">
                     <div className="w-1.5 h-1.5 rounded-full bg-[#00FF9C] shadow-[0_0_5px_#00FF9C88]" />
-                    <span className="text-[9px] font-black text-[#E2E8F0] tracking-widest uppercase">{n.name}</span>
+                    <span className="text-[9px] font-black text-[#E2E8F0] tracking-widest uppercase">{n.name} ({n.alarm_trigger_type || 'DETECTION'})</span>
                  </div>
-                 <button onClick={() => { setFormData(n); setIsEditing(true); }} className="opacity-0 group-hover:opacity-100 text-[#00F5FF] hover:text-white transition-opacity">
+                 <button onClick={() => { setFormData({...n, ip: n.stream_url, alarm_trigger_type: n.alarm_trigger_type || 'DETECTION'}); setIsEditing(true); }} className="opacity-0 group-hover:opacity-100 text-[#00F5FF] hover:text-white transition-opacity">
                     <Edit2 size={10} />
                  </button>
               </div>
               <div className="flex justify-between text-[7px] font-black text-[#94A3B8]/60 uppercase tracking-wider">
                  <span>{n.lat}, {n.lng}</span>
-                 <span>IP: {n.ip}</span>
+                 <span className="truncate max-w-[100px] ml-2 text-right">IP: {n.stream_url}</span>
               </div>
             </div>
           ))}

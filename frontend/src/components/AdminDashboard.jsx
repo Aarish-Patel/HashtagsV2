@@ -225,13 +225,21 @@ export default function AdminDashboard() {
     };
     const fetchAnalysis = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/analyze/all`);
-        const data = await res.json();
+        const res = await fetch(`${API_BASE}/api/threats/active`, { headers: authHdr });
+        if (!res.ok) return;
+        const activeThreatsList = await res.json();
         const threats = {};
-        (data.jobs || []).forEach(j => {
-          if (j.status === 'COMPLETE' && j.threat_detected) threats[j.node_id] = true;
-          else if (j.status === 'ANALYZING') threats[j.node_id] = 'analyzing';
+        activeThreatsList.forEach(t => {
+          if (t.threat_count > 0) threats[t.node_id] = true;
         });
+        // Still checking for analyzing jobs might be needed if they are still relevant
+        const jobRes = await fetch(`${API_BASE}/api/analyze/all`);
+        if (jobRes.ok) {
+          const jobData = await jobRes.json();
+          (jobData.jobs || []).forEach(j => {
+             if (j.status === 'ANALYZING' && !threats[j.node_id]) threats[j.node_id] = 'analyzing';
+          });
+        }
         setActiveThreats(threats);
       } catch (e) {}
     };
@@ -258,7 +266,11 @@ export default function AdminDashboard() {
       } catch (e) {}
     };
     load();
-  }, [selectedNode]);
+
+    const handleUpdate = () => load();
+    window.addEventListener('configUpdated', handleUpdate);
+    return () => window.removeEventListener('configUpdated', handleUpdate);
+  }, [selectedNode, nodes]);
 
   const showMsg = (msg, type = 'info') => {
     setMessage(msg); setMessageType(type);
@@ -299,6 +311,7 @@ export default function AdminDashboard() {
           name: form.name.trim() || form.id.trim(),
           lat: parseFloat(form.lat) || 0,
           lng: parseFloat(form.lng) || 0,
+          alarm_trigger_type: form.alarm_trigger_type || 'PIR',
         })
       });
       const data = await res.json();
@@ -380,9 +393,18 @@ export default function AdminDashboard() {
 
   const slider = (label, key, min, max, step, color = '#00F5FF', note = '') => (
     <div key={key}>
-      <div className="flex justify-between text-xs mb-1">
+      <div className="flex justify-between items-center text-xs mb-1">
         <span className="text-slate-400">{label}</span>
-        <span className="font-mono" style={{ color }}>{Number(nodeConfig[key]).toFixed(step < 1 ? 2 : 0)}</span>
+        <input type="number" min={min} max={max} step={step} value={nodeConfig[key]}
+          onChange={e => {
+             let val = step < 1 ? parseFloat(e.target.value) : parseInt(e.target.value);
+             if (isNaN(val)) val = min;
+             setNodeConfig({ ...nodeConfig, [key]: val });
+             setHasUnsavedChanges(true);
+          }}
+          className="w-16 bg-[#020617] text-right font-mono border border-slate-700 rounded px-1 py-0.5 text-xs focus:border-[#00F5FF] focus:outline-none"
+          style={{ color }}
+        />
       </div>
       <input type="range" min={min} max={max} step={step} value={nodeConfig[key]}
         onChange={e => { setNodeConfig({ ...nodeConfig, [key]: step < 1 ? parseFloat(e.target.value) : parseInt(e.target.value) }); setHasUnsavedChanges(true); }}

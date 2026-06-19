@@ -18,10 +18,10 @@
   {
     "id": "HASH-3",
     "name": "RPi GStreamer TCP",
-    "stream_url": "rawgst:640:480:gst-launch-1.0.exe -q tcpclientsrc host=192.168.0.7 port=5000 ! gdpdepay ! rtph264depay ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,format=BGR,width=640,height=480 ! fdsink fd=1 sync=false",
+    "stream_url": "rawgst:640:480:\"D:\\Coding\\msvc_x86_64\\bin\\gst-launch-1.0.exe\" -q tcpclientsrc host=192.168.0.7 port=5000 ! gdpdepay ! rtph264depay ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,format=BGR,width=640,height=480 ! fdsink fd=1 sync=false",
     "lat": 24.175,
     "lng": 94.255,
-    "alarm_trigger_type": "PIR"
+    "alarm_trigger_type": "DETECTION"
   },
   {
     "id": "HASH-4",
@@ -38,5 +38,13 @@
     "lat": 24.173,
     "lng": 94.259,
     "alarm_trigger_type": "DETECTION"
+  },
+  {
+    "id": "HASH-1781781956572",
+    "name": "BP74",
+    "stream_url": "http://192.168.0.199/stream",
+    "lat": 24.2,
+    "lng": 94.3,
+    "alarm_trigger_type": "PIR"
   }
 ]

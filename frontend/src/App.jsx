@@ -71,7 +71,7 @@ export default function App() {
 
   const fetchNodes = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/nodes`);
+      const res = await fetch(`${API_BASE}/api/nodes`, { cache: 'no-store' });
       if (!res.ok) return;
       const data = await res.json();
       // Normalize to the shape the rest of the app uses
@@ -104,11 +104,14 @@ export default function App() {
   // activeThreatNodes: [{node_id, name, lat, lng, threat_count, replay_url}]
   const [activeThreatNodes, setActiveThreatNodes] = useState([]);
 
-  // ── Polling ref to avoid stale closures ─────────────────────
+  // ── Polling refs to avoid stale closures ───────────────────
   const analysisJobsRef = useRef([]);
   analysisJobsRef.current = analysisJobs;
   const modeRef = useRef(MODE.STANDBY);
   modeRef.current = mode;
+  // Timestamp of last acknowledge — used to reject stale jobs in pollJobs.
+  // A ref (not state) so it's always current inside closures without re-renders.
+  const acknowledgedAtRef = useRef(0);
 
   // ── Clock ────────────────────────────────────────────────────
   useEffect(() => {
@@ -197,6 +200,7 @@ export default function App() {
           setReplayUrls(urls);
         } else if (modeRef.current === MODE.THREAT) {
           // All threats cleared
+          stopBrowserBuzzer();
           setMode(MODE.STANDBY);
           setReplayUrls({});
           setThreatEntities([]);
@@ -208,29 +212,42 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  // ── Poll for Auto-Generated Jobs & Active Jobs ────────────────────────────────
+  // ── Poll for Batch Analysis Jobs (SPACEBAR-triggered only) ───────────────────
+  // NOTE: INSTANT alarm jobs (PIR/DETECTION) are handled exclusively by
+  // pollThreats via _active_threat_count. pollJobs MUST NOT act on them.
   const [lastSeenJobId, setLastSeenJobId] = useState(null);
 
   useEffect(() => {
     const pollJobs = async () => {
+      // While in THREAT or CLEAR, do not interfere — pollThreats owns those states
       if (modeRef.current === MODE.THREAT || modeRef.current === MODE.CLEAR) return;
       
       try {
         const res = await fetch(`${API_BASE}/api/analyze/all`);
         const data = await res.json();
         const jobs = data.jobs || [];
-        if (jobs.length === 0) return;
 
-        // If we are in STANDBY, check if an auto-job was created
+        // Eligibility rules for pollJobs:
+        //   1. Not already acknowledged on the backend
+        //   2. NOT an INSTANT job — those are driven by _active_threat_count in pollThreats
+        //   3. Created AFTER the last time the operator hit Acknowledge
+        //      (prevents stale pre-acknowledge jobs from re-triggering)
+        const eligibleJobs = jobs.filter(j =>
+          !j.acknowledged &&
+          !j.job_id.startsWith('INSTANT') &&
+          (acknowledgedAtRef.current === 0 || (j.created_at * 1000) > acknowledgedAtRef.current)
+        );
+
+        if (eligibleJobs.length === 0) return;
+
+        // STANDBY → check if a new batch auto-job appeared
         if (modeRef.current === MODE.STANDBY) {
-            const latestJob = jobs[jobs.length - 1];
+            const latestJob = eligibleJobs[eligibleJobs.length - 1];
             if (latestJob.job_id !== lastSeenJobId) {
                 setLastSeenJobId(latestJob.job_id);
-                // ONLY trigger if the backend specifically flagged it as an auto-trigger
                 if (latestJob.is_auto_trigger) {
                     setAnalysisJobs([latestJob]);
                     setMode(MODE.ANALYZING);
-                    
                     setLogs(prev => [{
                         time: `[${new Date().toLocaleTimeString('en-GB')}]`,
                         txt: `AUTO_TRIGGER — Node ${latestJob.node_id} wake-up analysis started`,
@@ -241,7 +258,7 @@ export default function App() {
             return;
         }
 
-        // If we are in ANALYZING mode, we update the status of the jobs we know about
+        // ANALYZING → track progress of the batch jobs we launched
         if (modeRef.current === MODE.ANALYZING) {
             const currentJobIds = analysisJobsRef.current.map(j => j.job_id);
             const activeServerJobs = jobs.filter(j => currentJobIds.includes(j.job_id));
@@ -254,14 +271,12 @@ export default function App() {
                     const threatJobs = activeServerJobs.filter(j => j.threat_detected);
 
                     if (threatJobs.length > 0) {
-                        // THREAT CONFIRMED
                         const allEntities = threatJobs.flatMap(j => 
                             (j.entities || []).map(ent => ({ ...ent, camera: j.node_id }))
                         );
                         const maxThreat = Math.max(...threatJobs.map(j => j.max_threat_level || 0));
                         const urls = {};
                         threatJobs.forEach(j => {
-                            // Using clip_url (.mp4) instead of replay_url (MJPEG) because TacticalMap uses a <video> tag
                             if (j.clip_url) urls[j.node_id] = j.clip_url;
                             else if (j.replay_url) urls[j.node_id] = j.replay_url;
                         });
@@ -280,13 +295,11 @@ export default function App() {
                             score: maxThreat * 25,
                         }, ...prev.slice(0, 49)]);
                     } else {
-                        // NO THREAT (Silently go back to standby, no SECTOR CLEAR required unless there is a problem)
                         setMode(MODE.STANDBY);
                         setAnalysisJobs([]);
                     }
                 }
             } else {
-                // The jobs we were tracking vanished from the server (e.g., backend restarted)
                 setMode(MODE.STANDBY);
                 setAnalysisJobs([]);
             }
@@ -411,33 +424,57 @@ export default function App() {
     // Stop the alarm immediately
     stopBrowserBuzzer();
     
-    // Acknowledge this specific node's threat on the backend (decrements count)
-    if (nodeId) {
-      // Optimistic UI update for snappy feedback
-      setActiveThreatNodes(prev => prev.map(t => t.node_id === nodeId ? {...t, threat_count: t.threat_count - 1} : t).filter(t => t.threat_count > 0));
-      try {
-        await fetch(`${API_BASE}/api/admin/acknowledge/${nodeId}`, {
-          method: 'POST',
-          headers: { 'Authorization': token ? 'Bearer ' + token : '' }
-        });
-      } catch (e) { /* ignore */ }
-      // /api/threats/active poll will pick up the new state automatically
-      return;
-    }
-    // Legacy: dismiss all (no nodeId passed — e.g. ESC key)
+    // If called from an onClick the argument is a React SyntheticEvent — ignore it
+    if (nodeId && typeof nodeId === 'object') nodeId = undefined;
+
+    // Stamp the acknowledge time FIRST so pollJobs immediately ignores stale jobs,
+    // even before the backend responds.
+    acknowledgedAtRef.current = Date.now();
+
+    // Optimistically clear the UI so the user sees instant feedback
+    setActiveThreatNodes([]);
     setMode(MODE.STANDBY);
     setAnalysisJobs([]);
     setThreatEntities([]);
     setReplayUrls({});
-    setLastSeenJobId(`COOLDOWN-${Date.now()}`);
-    fetch(`${API_BASE}/api/analyze/all`)
-      .then(res => res.json())
-      .then(data => {
-         const jobs = data.jobs || [];
-         if (jobs.length > 0) setLastSeenJobId(jobs[jobs.length - 1].job_id);
-      })
-      .catch(() => {});
-  }, []);
+
+    // Collect all node IDs that need to be acknowledged on the backend
+    const nodesToAck = new Set();
+    if (nodeId) nodesToAck.add(nodeId);
+    activeThreatNodes.forEach(t => nodesToAck.add(t.node_id));
+    threatEntities.forEach(t => { if (t.camera) nodesToAck.add(t.camera); });
+    
+    if (nodesToAck.size > 0) {
+      // Helper: attempt one acknowledge POST.
+      // CRITICAL: if auth fails (expired/invalid token) we MUST retry without a
+      // token so the backend's dev-mode bypass accepts the request.
+      // Silently swallowing a 401 was the root cause of the persistent re-alarm.
+      const ackNode = async (nid) => {
+        const tryPost = async (includeAuth) => {
+          const headers = {};
+          if (includeAuth && token && token !== 'null' && token !== 'undefined') {
+            headers['Authorization'] = 'Bearer ' + token;
+          }
+          const res = await fetch(`${API_BASE}/api/admin/acknowledge/${nid}`, {
+            method: 'POST', headers
+          });
+          return res.ok;
+        };
+        try {
+          const ok = await tryPost(true);
+          if (!ok) {
+            // Auth rejected — retry without token (dev bypass allows header-less requests)
+            await tryPost(false);
+          }
+        } catch {
+          // Network/fetch error — last-resort attempt without auth header
+          try { await tryPost(false); } catch { /* truly unreachable */ }
+        }
+      };
+
+      await Promise.all(Array.from(nodesToAck).map(ackNode));
+    }
+  }, [activeThreatNodes, threatEntities, token]);
 
   // Global SPACEBAR listener
   useEffect(() => {

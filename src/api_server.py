@@ -32,6 +32,14 @@ from hashtag_v2_backend import get_system, AnalysisJob, CLIPS_DIR
 app = Flask(__name__)
 CORS(app)
 
+@app.after_request
+def add_header(response):
+    if request.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '-1'
+    return response
+
 # ───────────────────────────────────────────────────────────
 # MJPEG frame generator helpers
 # ───────────────────────────────────────────────────────────
@@ -497,6 +505,23 @@ def admin_simulate_threat(node_id):
     return jsonify({"status": "ok", "message": f"Threat simulated on {node_id}"})
 
 
+@app.route("/api/admin/instant_alarm/<node_id>", methods=["POST"])
+@require_role("COMMANDER")
+def admin_instant_alarm(node_id):
+    """Fire an instant alarm directly on a node (for testing / manual override).
+    Works even if the node has no frame buffer."""
+    sys_obj = get_system()
+    if node_id not in sys_obj.nodes:
+        return jsonify({"error": f"Node {node_id} not found"}), 404
+    from detection_engine import Detection
+    fake_det = Detection(x=100, y=100, w=200, h=300, confidence=0.99,
+                         class_name="Person", source="manual", keypoints=None, metadata={})
+    node = sys_obj.nodes[node_id]
+    trigger_type = getattr(node, "alarm_trigger_type", "PIR")
+    sys_obj.trigger_instant_alarm(node_id, [fake_det], from_inference=True)
+    return jsonify({"status": "ok", "message": f"Instant alarm fired on {node_id} (type={trigger_type})"})
+
+
 @app.route("/api/admin/set_background/<node_id>", methods=["POST"])
 @require_role("COMMANDER")
 def admin_set_background(node_id):
@@ -555,6 +580,24 @@ def admin_acknowledge(node_id):
     sys_obj = get_system()
     sys_obj.acknowledge_node(node_id)
     return jsonify({"status": "ok", "message": f"Alarm acknowledged for {node_id}"})
+
+
+@app.route("/api/admin/clear_clips", methods=["POST"])
+@require_role("OPERATOR")
+def admin_clear_clips():
+    """Clear all saved clips from the server."""
+    sys_obj = get_system()
+    import shutil
+    try:
+        shutil.rmtree(sys_obj.clips_dir)
+        os.makedirs(sys_obj.clips_dir, exist_ok=True)
+        # Also clear the forensic journal
+        from hashtag_v2_backend import FORENSIC_JOURNAL_PATH
+        if os.path.exists(FORENSIC_JOURNAL_PATH):
+            os.remove(FORENSIC_JOURNAL_PATH)
+        return jsonify({"status": "ok", "message": "All clips cleared"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/threats/active", methods=["GET"])

@@ -23,10 +23,10 @@ function FitBoundsController({ activeThreatNodes }) {
     if (activeThreatNodes.length > 0) {
       if (activeThreatNodes.length === 1) {
         const n = activeThreatNodes[0];
-        map.flyTo([n.lat, n.lng], 17, { duration: 1.4 });
+        map.flyTo([n.lat, n.lng], 15, { duration: 1.4 });
       } else {
         const bounds = L.latLngBounds(activeThreatNodes.map(n => [n.lat, n.lng]));
-        map.flyToBounds(bounds, { padding: [100, 100], maxZoom: 17, duration: 1.4 });
+        map.flyToBounds(bounds, { padding: [100, 100], maxZoom: 15, duration: 1.4 });
       }
     } else if (prevLen.current > 0) {
       // Just cleared — fly back to overview
@@ -44,10 +44,24 @@ function FitBoundsController({ activeThreatNodes }) {
 function MapResizer() {
   const map = useMap();
   useEffect(() => {
+    // Basic timeout for initial render
     const timer = setTimeout(() => {
       map.invalidateSize();
     }, 250);
-    return () => clearTimeout(timer);
+
+    // Advanced ResizeObserver to catch flexbox layout shifts (like banners appearing)
+    const container = map.getContainer();
+    if (!container) return;
+
+    const ro = new ResizeObserver(() => {
+      map.invalidateSize();
+    });
+    ro.observe(container);
+
+    return () => {
+      clearTimeout(timer);
+      ro.disconnect();
+    };
   }, [map]);
   return null;
 }
@@ -165,7 +179,7 @@ const TacticalMap = ({
         <TileLayer
           url="/tiles/{z}/{x}/{y}.png"
           maxZoom={22}
-          maxNativeZoom={15}
+          maxNativeZoom={14}
           minZoom={10}
           noWrap={true}
         />
@@ -251,7 +265,9 @@ const TacticalMap = ({
                         <button
                           onClick={e => {
                             e.stopPropagation();
-                            fetch(`${API_BASE}/api/admin/false_positive/${node.id}`, { method: 'POST' }).catch(() => {});
+                            fetch(`${API_BASE}/api/admin/false_positive/${node.id}`, { method: 'POST' })
+                              .then(() => window.dispatchEvent(new Event('configUpdated')))
+                              .catch(() => {});
                             onDismiss && onDismiss(node.id);
                           }}
                           className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 rounded text-[11px] font-black tracking-widest uppercase transition-all"

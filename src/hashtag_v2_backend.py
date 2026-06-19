@@ -386,10 +386,25 @@ class AnalysisJob:
         self.completed_at: float = 0.0
         self.is_auto_trigger = False
         self.live_threat_detected = False
+        self.acknowledged = False   # Set True when operator acknowledges the node
         self._lock = threading.Lock()
 
     def get_status_dict(self) -> Dict:
         with self._lock:
+            # Sanitize entities: YOLO bboxes contain numpy int32/float32 which
+            # are NOT JSON serializable. Convert every value to a native Python type.
+            def _sanitize(obj):
+                if isinstance(obj, dict):
+                    return {k: _sanitize(v) for k, v in obj.items()}
+                if isinstance(obj, (list, tuple)):
+                    return [_sanitize(v) for v in obj]
+                # numpy scalars (int32, float32, etc.) have an .item() method
+                if hasattr(obj, "item"):
+                    return obj.item()
+                return obj
+
+            safe_entities = _sanitize(self.entities)
+
             return {
                 "job_id": self.job_id,
                 "node_id": self.node_id,
@@ -398,13 +413,14 @@ class AnalysisJob:
                 "threat_detected": self.threat_detected,
                 "max_threat_level": self.max_threat_level,
                 "entity_count": len(self.entities),
-                "entities": self.entities,
+                "entities": safe_entities,
                 "total_frames": len(self.annotated_frames),
                 "clip_path": self.clip_path,
                 "clip_url": f"http://localhost:5000/clips/{os.path.basename(self.clip_path)}" if self.clip_path else "",
                 "replay_url": f"http://localhost:5000/video_feed/{self.node_id}" if self.job_id.startswith("INSTANT") else (f"http://localhost:5000/replay_feed/{self.job_id}/{self.node_id}" if self.threat_detected else ""),
                 "created_at": self.created_at,
                 "is_auto_trigger": self.is_auto_trigger,
+                "acknowledged": self.acknowledged,
             }
 
 
@@ -720,6 +736,7 @@ class CameraNode:
         # ── Multi-threat tracking ────────────────────────────────────────
         self._active_threat_count: int = 0        # unacknowledged threats on this node
         self._threat_count_lock = threading.Lock()
+        self._last_acknowledged_ts: float = 0.0   # timestamp of last operator acknowledge
 
         # ── Debug telemetry ──────────────────────────────────────────────
         self._last_capture_ts: float = 0.0         # when capture loop last got a frame
@@ -1028,12 +1045,23 @@ class CameraNode:
                 self._last_inference_ms = (time.perf_counter() - _cycle_start) * 1000
                 self._inference_cycle_count += 1
 
-                # If we detected an object here and ALARM_TRIGGER_TYPE is DETECTION, trigger it now.
-                # Only trigger if not already alarming to avoid blowing up the counter and queue
+                if len(detections) > 0:
+                    self._last_detection_ts = time.time()
+                
+                # A threat is only considered "cleared" if no detections occurred for 30 seconds.
+                # 30s prevents rapid false-positive loops where brief gaps between detections
+                # re-arm the alarm and immediately fire again.
+                time_since_last_det = time.time() - getattr(self, '_last_detection_ts', 0)
+                if time_since_last_det > 30.0:
+                    self._threat_cleared_since_last_alarm = True
+                
                 if self.alarm_trigger_type == "DETECTION" and len(detections) > 0:
                     with self._threat_count_lock:
                         already_alarming = self._active_threat_count > 0
-                    if not already_alarming:
+                    
+                    cleared = getattr(self, '_threat_cleared_since_last_alarm', True)
+                    if not already_alarming and cleared:
+                         self._threat_cleared_since_last_alarm = False
                          self.system.trigger_instant_alarm(self.node_id, detections, from_inference=True)
 
             except Exception as e:
@@ -1092,6 +1120,7 @@ class CameraNode:
                     self.system.save_live_clip(self.node_id, list(self.frame_buffer), self._latest_detections)
                 with self._lock:
                     self.frame_buffer.clear()
+                    self._raw_frame = None
                 self.threat_detected_this_session = False
                 self._was_online = False
                         
@@ -1257,9 +1286,13 @@ class CameraNode:
             if not ret:
                 self.online = False
                 
+                with self._lock:
+                    self._raw_frame = None
+                
                 # --- AUTO RECALIBRATION LOGIC ---
                 if self._was_online:
                     self._was_online = False
+                    self._stream_offline_ts = time.time()  # stamp when stream dropped
                     if getattr(self, '_had_large_discrepancy', False) and not getattr(self, '_human_detected_this_session', False):
                         # A massive structural change happened, but the AI confirmed it was NOT a human.
                         # (e.g. tree fell, fence built, car parked). We auto-capture this as the new background!
@@ -1275,6 +1308,7 @@ class CameraNode:
                         cap = None
                     continue
                     
+            # A valid frame was received
             if not self._was_online:
                 self._was_online = True
                 self.threat_detected_this_session = True
@@ -1283,10 +1317,26 @@ class CameraNode:
                 
                 # Instant Alarm: The moment the PIR connects the stream, we trigger the alarm.
                 if self.alarm_trigger_type == "PIR":
-                    from detection_engine import Detection
-                    fake_det = Detection(x=0, y=0, w=0, h=0, confidence=1.0, class_name="PIR Trigger", source="system", keypoints=None, metadata={})
-                    self.system.trigger_instant_alarm(self.node_id, [fake_det])
-                    print(f"[{self.node_id}] STREAM CONNECTED! PIR Instant alarm triggered.")
+                    now_ts = time.time()
+                    time_since_last_alarm = now_ts - getattr(self, '_last_pir_alarm_ts', 0)
+                    time_offline = now_ts - getattr(self, '_stream_offline_ts', 0)
+
+                    # A "new session" is when the PIR hardware stops streaming for >2 seconds
+                    # (The hardware has a ~15s delay between 30s clips).
+                    # A "long cooldown" forces a re-alarm if the stream stays connected for >5 minutes.
+                    # The 15s basic debounce prevents immediate re-alarms after an operator acknowledges.
+                    is_new_session = time_offline > 2.0
+                    is_long_cooldown = time_since_last_alarm > 300.0
+
+                    if time_since_last_alarm > 15.0 and (is_new_session or is_long_cooldown):
+                        self._last_pir_alarm_ts = now_ts
+                        from detection_engine import Detection
+                        fake_det = Detection(x=0, y=0, w=0, h=0, confidence=1.0, class_name="PIR Trigger", source="system", keypoints=None, metadata={})
+                        self.system.trigger_instant_alarm(self.node_id, [fake_det])
+                        print(f"[{self.node_id}] STREAM CONNECTED! PIR alarm triggered (offline={time_offline:.0f}s).")
+                    else:
+                        reason = f"offline only {time_offline:.0f}s" if not is_new_session else f"debounce {time_since_last_alarm:.0f}s"
+                        print(f"[{self.node_id}] STREAM CONNECTED! PIR alarm suppressed ({reason}).")
 
             self.online = True
             
@@ -1581,6 +1631,7 @@ class HashtagSystem:
                 "clips_saved": node.clips_saved,
                 "has_permanent_bg": node.permanent_bg_edges is not None,
                 "viz_mode": node._viz_mode,
+                "active_threat_count": node._active_threat_count,
                 "config": asdict(cfg),
             })
         return result
@@ -1702,6 +1753,10 @@ class HashtagSystem:
             sim_path = os.path.join(CLIPS_DIR, f"temp_{node_id}_simulated.mp4")
             if self.nodes[node_id]._save_buffer_to_mp4(sim_path):
                 self.trigger_auto_threat(node_id, sim_path)
+            else:
+                # No frame buffer (node is offline) — fire instant alarm directly so the test is useful
+                self.trigger_instant_alarm(node_id, [fake_det], from_inference=True)
+                print(f"[ADMIN] No buffer for {node_id} — fired instant alarm instead")
 
     def trigger_auto_threat(self, node_id: str, mp4_path: str):
         job_id = f"AUTO-{uuid.uuid4()}"
@@ -1763,15 +1818,39 @@ class HashtagSystem:
 
     def acknowledge_node(self, node_id: str):
         """Operator has acknowledged one threat on this node.
-        Decrements the active threat count. Only clears the session
-        flag once ALL threats have been acknowledged (count reaches 0).
+        Clears the active threat count, stamps the acknowledge time, and marks
+        all existing jobs for this node as acknowledged so the frontend job
+        poller cannot re-trigger an alarm from a stale completed job.
         """
         node = self.nodes.get(node_id)
         if not node:
             return
-        node._active_threat_count = max(0, node._active_threat_count - 1)
-        
-        # Check global unacknowledged threat count
+
+        now = time.time()
+        node._active_threat_count = 0
+        node._last_acknowledged_ts = now
+        node.threat_detected_this_session = False
+
+        # Re-arm debounce: DETECTION nodes need 5s of clean frames before
+        # they can alarm again.  Setting _last_detection_ts = now means the
+        # 5-second window starts from the moment of acknowledge, not from
+        # whenever the last real detection happened.
+        node._last_detection_ts = now
+        node._threat_cleared_since_last_alarm = False  # must wait 5s before re-arming
+
+        # PIR nodes: suppress any re-alarm until the stream has dropped and
+        # stayed offline.  We record when we acknowledged so the PIR trigger
+        # can check whether a reconnect happened *after* the acknowledge.
+        node._last_pir_alarm_ts = now  # resets the 15-second PIR debounce too
+
+        # Mark every existing job for this node as acknowledged so pollJobs
+        # on the frontend will skip them and never re-raise the alarm.
+        with self._job_lock:
+            for job in self._jobs.values():
+                if job.node_id == node_id:
+                    job.acknowledged = True
+
+        # Silence the buzzer if all nodes are now clear
         total_threats = sum(n._active_threat_count for n in self.nodes.values())
         if total_threats == 0:
             try:
@@ -1779,16 +1858,11 @@ class HashtagSystem:
                 winsound.PlaySound(None, winsound.SND_PURGE)
             except Exception:
                 pass
-                
-        if node._active_threat_count == 0:
-            node.threat_detected_this_session = False
-            node._was_online = False
-            print(f"[ADMIN] All threats acknowledged for {node_id}")
-        else:
-            print(f"[ADMIN] Threat ack for {node_id} — {node._active_threat_count} unacknowledged remaining")
+
+        print(f"[ADMIN] All threats acknowledged for {node_id} — all jobs stamped acknowledged")
         self._log_event(
             "ALARM_ACKNOWLEDGED",
-            f"{node_id}: Threat acknowledged ({node._active_threat_count} remaining)"
+            f"{node_id}: Threat acknowledged (all jobs cleared)"
         )
 
     def get_active_threats(self) -> List[Dict]:
@@ -1847,7 +1921,7 @@ class HashtagSystem:
         if yolo_conf < HIGH_YOLO and blob_area >= LARGE_BLOB:
             # Prong B (YOLO) is the problem: blob was clearly there, YOLO triggered at junk confidence
             delta_b_conf = 0.03
-            cfg.person_conf = min(0.50, cfg.person_conf + delta_b_conf)
+            cfg.person_conf = min(1.0, cfg.person_conf + delta_b_conf)
             cfg.prong_b_fp_score += 1.0
             result.update({"blame": "PRONG_B",
                            "action": f"YOLO conf raised {cfg.person_conf - delta_b_conf:.2f} → {cfg.person_conf:.2f}",
@@ -1857,20 +1931,34 @@ class HashtagSystem:
             # Prong A is the problem: tiny blob triggered, YOLO confirmed it spuriously
             delta_a_thr = 3
             cfg.prong_a_threshold = min(80, cfg.prong_a_threshold + delta_a_thr)
+            cfg.min_blob_area = min(2000, cfg.min_blob_area + 100) # tighten blob
+            cfg.canny_low = min(150, cfg.canny_low + 5)
+            cfg.canny_high = min(250, cfg.canny_high + 5)
             cfg.prong_a_fp_score += 1.0
             result.update({"blame": "PRONG_A",
-                           "action": f"Prong A threshold raised {cfg.prong_a_threshold - delta_a_thr} → {cfg.prong_a_threshold}",
+                           "action": f"Prong A threshold raised, min_blob increased to {cfg.min_blob_area}, canny tightened",
                            "reason": "Small structural discrepancy blob triggered false detection"})
 
         else:
             # Both are ambiguous — split correction
-            cfg.person_conf = min(0.50, cfg.person_conf + 0.015)
+            cfg.person_conf = min(1.0, cfg.person_conf + 0.015)
             cfg.prong_a_threshold = min(80, cfg.prong_a_threshold + 2)
+            cfg.min_blob_area = min(2000, cfg.min_blob_area + 50)
+            cfg.pixel_weight = min(0.8, cfg.pixel_weight + 0.05)
             cfg.prong_a_fp_score += 0.5
             cfg.prong_b_fp_score += 0.5
             result.update({"blame": "SPLIT",
-                           "action": "Both Prong A threshold (+2) and YOLO conf (+0.015) tightened slightly",
+                           "action": "Prong A threshold, blob area, pixel weight, and YOLO conf all tightened slightly",
                            "reason": "Ambiguous false positive — both prongs contributed"})
+
+        _save_node_configs(self._node_configs)
+
+        # Automatically capture a new background to clear out structural bugs
+        try:
+            self.set_permanent_background(node_id)
+            result["action"] += " | New background captured"
+        except Exception as e:
+            print(f"Failed to capture new background on FP report: {e}")
 
         _save_node_configs(self._node_configs)
 

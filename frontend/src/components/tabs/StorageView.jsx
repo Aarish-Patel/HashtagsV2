@@ -70,10 +70,10 @@ const StorageView = ({
                      <span className="text-[9px] font-black text-[#00F5FF] tabular-nums bg-black/40 border border-[#00F5FF]/20 px-2 py-0.5 rounded-sm shadow-[0_0_10px_#00F5FF22]">{filteredIncidents.length}</span>
                      <button
                         onClick={handleClearAll}
-                        className="p-1 text-red-500 hover:bg-red-500/20 rounded transition-colors"
+                        className="text-[9px] font-black tracking-widest text-[#FF3B3B] uppercase bg-[#FF3B3B]/10 hover:bg-[#FF3B3B]/20 border border-[#FF3B3B]/30 px-2 py-0.5 rounded transition-colors flex items-center gap-1"
                         title="Delete All Recordings"
                      >
-                        <Trash2 size={12} />
+                        <Trash2 size={10} /> CLEAR ALL
                      </button>
                   </div>
                </div>
