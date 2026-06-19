@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import X from 'lucide-react/dist/esm/icons/x';
 import Plus from 'lucide-react/dist/esm/icons/plus';
 import Edit2 from 'lucide-react/dist/esm/icons/edit-2';
+import Trash2 from 'lucide-react/dist/esm/icons/trash-2';
 import Send from 'lucide-react/dist/esm/icons/send';
 import PlayCircle from 'lucide-react/dist/esm/icons/play-circle';
 import CheckCircle from 'lucide-react/dist/esm/icons/check-circle';
@@ -186,6 +187,18 @@ const NodeManager = ({ nodes, setNodes }) => {
     setIsEditing(false);
   };
 
+  const handleDelete = async (id) => {
+    if (!window.confirm("PERMANENTLY DELETE THIS NODE? This will archive all its clips.")) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/nodes/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        setNodes(nodes.filter(n => n.id !== id));
+      }
+    } catch (e) {
+      console.error("Failed to delete node:", e);
+    }
+  };
+
   return (
     <div className="px-5 flex flex-col mb-4">
       <div className="flex justify-between items-center mb-2 border-b border-white/5 pb-1 opacity-80">
@@ -221,9 +234,14 @@ const NodeManager = ({ nodes, setNodes }) => {
                     <div className="w-1.5 h-1.5 rounded-full bg-[#00FF9C] shadow-[0_0_5px_#00FF9C88]" />
                     <span className="text-[9px] font-black text-[#E2E8F0] tracking-widest uppercase">{n.name} ({n.alarm_trigger_type || 'DETECTION'})</span>
                  </div>
-                 <button onClick={() => { setFormData({...n, ip: n.stream_url, alarm_trigger_type: n.alarm_trigger_type || 'DETECTION'}); setIsEditing(true); }} className="opacity-0 group-hover:opacity-100 text-[#00F5FF] hover:text-white transition-opacity">
-                    <Edit2 size={10} />
-                 </button>
+                 <div className="opacity-0 group-hover:opacity-100 flex gap-2 transition-opacity">
+                    <button onClick={() => { setFormData({...n, ip: n.stream_url, alarm_trigger_type: n.alarm_trigger_type || 'DETECTION'}); setIsEditing(true); }} className="text-[#00F5FF] hover:text-white">
+                       <Edit2 size={10} />
+                    </button>
+                    <button onClick={() => handleDelete(n.id)} className="text-[#FF3B3B] hover:text-white">
+                       <Trash2 size={10} />
+                    </button>
+                 </div>
               </div>
               <div className="flex justify-between text-[7px] font-black text-[#94A3B8]/60 uppercase tracking-wider">
                  <span>{n.lat}, {n.lng}</span>
