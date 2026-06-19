@@ -150,7 +150,7 @@ const CurrentAlerts = ({ incidents, nodes }) => {
 
 const NodeManager = ({ nodes, setNodes }) => {
   const [isEditing, setIsEditing] = useState(false);
-  const [formData, setFormData] = useState({ id: '', name: '', lat: '', lng: '', ip: '', alarm_trigger_type: 'DETECTION' });
+  const [formData, setFormData] = useState({ id: '', name: '', lat: '', lng: '', ip: '', alarm_trigger_type: 'PIR' });
 
   const handleSave = async () => {
     if (!formData.name || !formData.lat || !formData.lng || !formData.ip) return;
@@ -164,8 +164,8 @@ const NodeManager = ({ nodes, setNodes }) => {
       name: formData.name,
       lat: parseFloat(formData.lat),
       lng: parseFloat(formData.lng),
-      stream_url: formData.ip.startsWith('http') || formData.ip.startsWith('raw') ? formData.ip : `http://${formData.ip}/stream`,
-      alarm_trigger_type: formData.alarm_trigger_type || 'DETECTION'
+      stream_url: formData.ip.startsWith('http') || formData.ip.startsWith('raw') || formData.ip.startsWith('tcp') || formData.ip.includes('!') ? formData.ip : `http://${formData.ip}/stream`,
+      alarm_trigger_type: formData.alarm_trigger_type || 'PIR'
     };
 
     try {
@@ -216,7 +216,7 @@ const NodeManager = ({ nodes, setNodes }) => {
            <input className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white placeholder-slate-600 outline-none focus:border-[#00F5FF]/50" placeholder="Latitude (e.g. 24.165)" value={formData.lat} onChange={e => setFormData({...formData, lat: e.target.value})} />
            <input className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white placeholder-slate-600 outline-none focus:border-[#00F5FF]/50" placeholder="Longitude (e.g. 94.259)" value={formData.lng} onChange={e => setFormData({...formData, lng: e.target.value})} />
            <input className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white placeholder-slate-600 outline-none focus:border-[#00F5FF]/50" placeholder="Stream IP (e.g. 192.168.1.50)" value={formData.ip} onChange={e => setFormData({...formData, ip: e.target.value})} />
-           <select className="bg-black border border-white/10 text-[9px] p-1.5 px-2 text-white outline-none focus:border-[#00F5FF]/50" value={formData.alarm_trigger_type || 'DETECTION'} onChange={e => setFormData({...formData, alarm_trigger_type: e.target.value})}>
+           <select className="w-full bg-[#0F172A]/50 border border-slate-700 rounded px-2 py-1 text-white text-[10px] focus:outline-none focus:border-[#00F5FF]" value={formData.alarm_trigger_type || 'PIR'} onChange={e => setFormData({...formData, alarm_trigger_type: e.target.value})}>
              <option value="DETECTION">DETECTION</option>
              <option value="PIR">PIR</option>
            </select>
@@ -232,10 +232,10 @@ const NodeManager = ({ nodes, setNodes }) => {
               <div className="flex justify-between items-center">
                  <div className="flex items-center gap-1.5">
                     <div className="w-1.5 h-1.5 rounded-full bg-[#00FF9C] shadow-[0_0_5px_#00FF9C88]" />
-                    <span className="text-[9px] font-black text-[#E2E8F0] tracking-widest uppercase">{n.name} ({n.alarm_trigger_type || 'DETECTION'})</span>
+                    <span className="text-[9px] font-black text-[#E2E8F0] tracking-widest uppercase">{n.name} ({n.alarm_trigger_type || 'PIR'})</span>
                  </div>
                  <div className="opacity-0 group-hover:opacity-100 flex gap-2 transition-opacity">
-                    <button onClick={() => { setFormData({...n, ip: n.stream_url, alarm_trigger_type: n.alarm_trigger_type || 'DETECTION'}); setIsEditing(true); }} className="text-[#00F5FF] hover:text-white">
+                    <button onClick={() => { setFormData({...n, ip: n.stream_url, alarm_trigger_type: n.alarm_trigger_type || 'PIR'}); setIsEditing(true); }} className="text-[#00F5FF] hover:text-white">
                        <Edit2 size={10} />
                     </button>
                     <button onClick={() => handleDelete(n.id)} className="text-[#FF3B3B] hover:text-white">

@@ -1,52 +1,50 @@
-# Hashtag V2 Admin Guide
+# Hashtags V2 - Admin Guide
 
-Welcome to the Hashtag V2 Admin Dashboard. This guide explains the core configuration parameters available in the dashboard and how they affect the detection pipeline.
+## Overview
+The Admin Dashboard allows you to manage node infrastructure, tune the dual-prong detection engine, and monitor system telemetry. Access this panel via the Gear icon in the sidebar (requires `COMMANDER` role privileges).
 
-## 1. Detection Modes
+## Node Management
+### Adding a Node
+1. Click **+ ADD** in the Field Nodes panel.
+2. Provide a unique **Node ID** (e.g. `HASH-6`).
+3. Provide the **Stream URL** (e.g. `http://192.168.1.100/stream`).
+4. (Optional) Provide GPS coordinates (Lat/Lng) to place the node accurately on the Tactical Map.
+5. Select the **Trigger Type**:
+   - `PIR`: Relies on an external motion sensor to trigger the camera stream and analysis.
+   - `DETECTION`: The stream is always on, and the AI continuously looks for threats.
 
-The Hashtag system uses a hybrid detection engine combining two distinct 'prongs' to achieve high accuracy and eliminate false positives.
-- **Prong A (Structural Discrepancy Filter)**: Analyzes low-level pixel differences and structural changes between the live camera feed and a pre-captured 'permanent background' image.
-- **Prong B (AI Object Detection)**: Uses YOLO (You Only Look Once) to identify the semantic classes of objects within those changed areas.
+### Deleting a Node
+Hover over the node card, click the Trash icon, and confirm. This will archive the node's clips but immediately stop all processing and remove it from the active map.
 
-### How they work together:
-The system defaults to a **Combined Mode** where an alarm is *only* triggered if **Prong A** detects a physical change in the environment AND **Prong B** confirms that the object causing the change is a person or weapon, AND they physically overlap (Intersection Gate). If a camera has no saved background, it falls back to standard MOG2 motion detection.
+## Sensitivity Tuning (Dual-Prong Engine Parameters)
+The system validates threats using two prongs: Prong A (Structural/Physical Movement) and Prong B (YOLO AI Classification). The intersection of these two prongs prevents false alarms. You can tune these parameters on a per-node basis using the sliders in the Admin panel.
 
-## 2. Tuning Parameters (Node Config)
+### 1. Edge Threshold (Prong A)
+- **Meaning**: Controls the sensitivity of the Canny Edge Detection algorithm. It determines how stark a contrast must be for the system to consider it an "edge" of a physical object.
+- **How to Use**: 
+  - **Decrease** this if the camera is in low contrast/fog/darkness and is missing moving objects.
+  - **Increase** this if the camera is picking up too much noise, shadows, or minor lighting changes.
 
-The Admin panel allows you to fine-tune the sensitivity of these detection prongs for each camera independently.
+### 2. Min Blob Area (Prong A)
+- **Meaning**: The minimum pixel size of a moving object required to trigger Prong A.
+- **How to Use**:
+  - **Decrease** if you need to detect very distant, small targets (e.g., people far away).
+  - **Increase** if the camera is falsely triggering on small moving objects like insects, small birds, or rustling leaves near the lens.
 
-### Prong B — YOLO
-- **Confidence (`person_conf`)**: The minimum confidence score required for the AI to confirm an object is a person. Ranges from 0.0 to 1.0. Increase this to reduce AI false positives.
-- **YOLO Weight (`prong_b_weight`)**: How much the AI's confidence contributes to the final calculated Threat Score. Higher means you trust the AI more than the physical motion.
+### 3. Confidence (Prong B)
+- **Meaning**: The YOLOv8 AI confidence threshold (0.0 to 1.0). The neural network must be this confident that what it sees is a human or weapon.
+- **How to Use**:
+  - **Decrease** (e.g., 0.25) if the AI is failing to detect camouflaged or partially obscured targets.
+  - **Increase** (e.g., 0.60) if the AI is hallucinating threats (e.g., mistaking a tree trunk for a person).
 
-### Prong A — Structural
-- **Edge Threshold (`prong_a_threshold`)**: The intensity difference required for a pixel to be considered "changed" when comparing edges. Increase this if noisy lighting triggers motion.
-- **Prong A Weight (`prong_a_weight`)**: How much the structural/motion severity contributes to the final calculated Threat Score. Higher means you trust physical disruption more than the AI.
-- **Min Blob (px²) (`min_contour_area`)**: The minimum size a changed area must be before the system pays attention to it. Increase to ignore bugs or small animals. Decrease to detect distant intruders.
+### 4. Min IoU (Intersection over Union)
+- **Meaning**: This measures how tightly the bounding box of the physical movement (Prong A) must overlap with the bounding box of the AI classification (Prong B). 
+- **How to Use**:
+  - **Increase** (e.g., 0.5) for extremely strict verification. The AI target and the physical movement must overlap almost perfectly. Use this in highly dynamic environments (trees blowing in the wind) to completely eliminate ghosting.
+  - **Decrease** (e.g., 0.0) to completely disable the spatial intersection check. This means if *any* movement happens anywhere in the frame, and a person is detected *anywhere* in the frame, an alarm triggers. Use this in static, sterile environments (like an empty hallway) where any movement is a threat.
 
-### Intersection Gate
-These parameters ensure that the AI detection bounding box physically overlaps with the physical motion blob. This prevents the AI from falsely identifying a static object (like a statue) when a bird flies by.
-- **Min IoU (`intersection_iou`)**: Minimum Intersection over Union. Checks how much the motion blob and AI box overlap relative to their combined size.
-- **Min Containment (`intersection_containment`)**: Minimum containment. Checks how much of the motion blob is entirely contained within the AI bounding box.
+## Background Operations
+- **Capture Background**: For nodes with heavy static backgrounds, use this button to capture a baseline frame.
+- **Revert to MOG2**: If the background changes frequently, revert to dynamic MOG2 background subtraction.
 
-### Canny Edge Detection
-- **Canny Low (`canny_low`)**: Determines how weak edges can be connected to strong edges in the background capturing process.
-- **Canny High (`canny_high`)**: Determines the initial threshold for strong edges in the background capturing process.
-
-### Display Mode (Diagnostic)
-These modes only affect the visual overlay on the camera feed to help you tune the system, they do not affect the detection logic:
-- **COMBINED**: Standard view showing both motion contours and AI bounding boxes.
-- **PRONG_A**: Shows only the physical motion blobs/contours.
-- **PRONG_B**: Shows only the AI bounding boxes.
-- **RAW**: Shows the raw camera feed with no overlays.
-
-## 3. Threat States & Actions
-
-- **Trigger Type**: The condition required to set off the main siren. 
-  - `PIR` mode is used for battery-powered cameras that only wake up and send a video stream when their built-in motion sensor triggers. It instantly alarms when a stream connects.
-  - `DETECTION` mode is used for continuous video feeds. It only alarms when a verified threat is actively detected in the frame.
-- **Acknowledge**: Stops the siren and clears the flashing alert from the UI for a specific threat.
-- **Report False Positive**: Marks a detection as incorrect. The system will automatically tune its parameters (such as `person_conf` or `min_contour_area`) to ignore similar false positives in the future, and will recapture a new clean background automatically.
-- **Set Permanent Background**: Captures the current camera view and uses it as the baseline for Prong A. Ensure no people are in the frame when you click this.
-- **Clear Background**: Reverts the node to standard MOG2 motion detection.
-- **Clear All Clips**: Permanently deletes all forensic video recordings from the disk.
+*Note: Always remember to click **SAVE TUNING TO DISK** after making changes.*

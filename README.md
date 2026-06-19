@@ -1,64 +1,25 @@
-# Hashtag V2 — Border Surveillance System
+# Hashtags V2
 
-Hashtag V2 is a tactical border surveillance system that aggregates video feeds from multiple nodes (IP cameras, ESP32-CAMs, Raspberry Pis) and runs AI-based object detection (YOLOv8) and thermal motion analysis to detect unauthorized intrusions or weapons in real-time. 
+Hashtags V2 is a cutting-edge, ML-powered, multi-node tactical surveillance system built for robust edge deployments. 
 
-It provides a modern React frontend dashboard with a tactical map and live video analytics.
+## Core Capabilities
+- **Multi-Node Feed Aggregation:** Monitor live streams from distributed surveillance nodes simultaneously.
+- **AI-Powered Threat Detection:** Employs a dual-prong analysis engine (YOLOv8 + Structural Discrepancy/Canny Edge) for high-accuracy, low-latency threat classification.
+- **Instant Alerts & Polling:** Frontend automatically polls the backend to immediately alert operators upon detecting threats or structural changes.
+- **Forensic Video Storage:** Automatically records, annotates, and catalogs video clips (incidents) triggered by threats.
+- **Heatmap Analytics:** Provides a 30-day spatial distribution of active threats across your nodes for tactical review.
 
-## Prerequisites & Downloads
+## System Components
+### Backend (`src/`)
+- Built on **Flask** with a sophisticated multi-threaded camera ingestion and ML analysis loop.
+- **Engine**: Uses YOLO and traditional computer vision (OpenCV) to distinguish valid threats from benign movement.
 
-To run this system, you must install the following software. Please ensure you check the box that says **"Add to PATH"** during installation for each of these!
+### Frontend (`frontend/`)
+- Built on **React + Vite + TailwindCSS**.
+- Provides a comprehensive Dashboard containing Tactical Maps, Live Feeds, Storage Views, Alert Histories, and Admin Configuration Panels.
 
-1. **Python 3.10 or higher**
-   - Download: [python.org/downloads](https://www.python.org/downloads/)
-   - *Crucial: Check "Add Python to PATH" at the bottom of the installer!*
-
-2. **Node.js 18 or higher**
-   - Download: [nodejs.org](https://nodejs.org/en/download/)
-   - *Installs `npm` which is required for the React dashboard.*
-
-3. **GStreamer 1.0+ (MSVC 64-bit)** *(Optional but recommended)*
-   - Download: [gstreamer.freedesktop.org](https://gstreamer.freedesktop.org/download/)
-   - Required ONLY if you are using TCP raw GStreamer pipelines (like `rawgst:...` in your `nodes.json`).
-   - You must add the `\bin` folder of GStreamer to your Windows environment PATH variables so the `gst-launch-1.0` command works.
-
-4. **Internet Connection (First Run Only)**
-   - The system uses Ultralytics YOLOv8. The `yolov8n.pt` model weights (approx 6.5MB) will be downloaded automatically from the internet on the first run. Ensure you are connected to the internet.
-
-## Quick Start (Instantly Run)
-
-Simply double-click the **`start_hashtag.bat`** file on Windows.
-
-The startup script will automatically:
-1. Create an isolated Python virtual environment.
-2. Install all required AI and backend dependencies.
-3. Install all React frontend dependencies.
-4. Launch the AI processing server on port 5000.
-5. Launch the React dashboard on port 5173.
-6. Open your browser automatically to the Tactical Dashboard.
-
-*Note: The first launch will take a few minutes as it downloads PyTorch, OpenCV, and Node packages. Subsequent launches will be near-instant.*
-
-## Adding New Camera Nodes
-
-To add new IP cameras or streaming nodes to the network:
-1. Open `src/nodes.json` in a text editor.
-2. Add a new node object with an ID, name, stream URL, and coordinates.
-
-Example for an ESP32-CAM:
-```json
-{
-  "id": "HASH-4",
-  "name": "Field Node 4",
-  "stream_url": "http://192.168.0.201:81/stream",
-  "lat": 24.172,
-  "lng": 94.258
-}
-```
-3. Restart the system using `start_hashtag.bat`.
-
-## System Architecture
-
-- **Frontend**: React + Vite + Leaflet (Offline Maps)
-- **Backend**: Python + Flask
-- **AI Core**: YOLOv8 Object Detection + OpenCV Background Subtraction & Edge Detection
-- **Streaming**: Multi-threaded buffered MJPEG processing pipeline
+## Documentation
+For detailed operational procedures, please refer to:
+- [User Guide](User_Guide.md) - For surveillance operators monitoring live feeds and alerts.
+- [Admin Guide](Admin_Guide.md) - For system administrators adding nodes and tuning detection thresholds.
+- [Military Features Report](Military_Features_Report.md) - Analysis of the tactical and strategic benefits of this system for military deployments.

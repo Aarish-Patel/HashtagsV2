@@ -40,3 +40,21 @@ When an alarm triggers:
 4. If you determine the alarm was a false alarm, you can click **FALSE POSITIVE**. This logs the discrepancy so the Admin can tune the sensitivity later.
 
 
+
+## Adding Nodes
+To add a new surveillance node, hover over the left sidebar to expand it and click the **+ (Plus)** icon in the Node Manager section. You can enter various types of streams into the **Stream IP** field:
+
+1. **Standard IP Camera (HTTP MJPEG/Web Stream)**
+   - Simply enter the IP address (e.g., `192.168.1.50`). The system will automatically prepend `http://` and append `/stream`.
+   - Or, you can explicitly type the full URL: `http://192.168.1.50/video`.
+
+2. **Raspberry Pi (GStreamer TCP Stream)**
+   - If your Raspberry Pi is streaming via a raw TCP h264 payload, you can use a raw GStreamer pipeline string.
+   - For example, if your RPi is at `192.168.0.7`, paste the following exact string into the Stream IP field:
+     `tcpclientsrc host=192.168.0.7 port=5000 ! gdpdepay ! rtph264depay ! avdec_h264 ! videoconvert ! appsink drop=1`
+   - *(Note: Do not use `autovideosink` in the system input. The local testing command `gst-launch-1.0.exe ... autovideosink` is only for viewing the stream directly on your monitor outside of Hashtags).*
+
+3. **RTSP Streams**
+   - You can enter full RTSP URLs if your camera supports it: `rtsp://admin:password@192.168.1.64:554/stream1`.
+
+Make sure to select the correct **TRIGGER** type (`PIR` for hardware-triggered setups, or `DETECTION` for software motion/ML triggers) when adding the node.

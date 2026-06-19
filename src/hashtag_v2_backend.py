@@ -113,6 +113,11 @@ def _delete_bg_from_disk(node_id: str):
     except Exception as e:
         print(f"[BG] Failed to delete background for {node_id}: {e}")
 
+def _get_node_dir(node_id: str, node_name: str) -> str:
+    """Helper to generate the clip storage directory for a node."""
+    safe_name = str(node_name or node_id).replace(" ", "_").upper()
+    return os.path.join(CLIPS_DIR, f"{safe_name}_{node_id}")
+
 # Default nodes written to nodes.json on first run.
 # Edit nodes.json to change camera URLs/locations permanently.
 _DEFAULT_NODES = [
@@ -1059,8 +1064,12 @@ class CameraNode:
                     with self._threat_count_lock:
                         already_alarming = self._active_threat_count > 0
                     
+                    # Ensure node has been online for at least 5 seconds to prevent
+                    # connection artifacts from causing false alarms
+                    warmup_clear = time.time() - getattr(self, '_session_start_time', 0) > 5.0
+                    
                     cleared = getattr(self, '_threat_cleared_since_last_alarm', True)
-                    if not already_alarming and cleared:
+                    if not already_alarming and cleared and warmup_clear:
                          self._threat_cleared_since_last_alarm = False
                          self.system.trigger_instant_alarm(self.node_id, detections, from_inference=True)
 
@@ -1542,8 +1551,8 @@ class HashtagSystem:
             old_safe = str(node.name).replace(" ", "_").upper()
             new_name = kwargs["name"]
             new_safe = str(new_name).replace(" ", "_").upper()
-            old_dir = os.path.join(CLIPS_DIR, node_id, old_safe)
-            new_dir = os.path.join(CLIPS_DIR, node_id, new_safe)
+            old_dir = _get_node_dir(node_id, node.name)
+            new_dir = _get_node_dir(node_id, new_name)
             if os.path.isdir(old_dir) and not os.path.exists(new_dir):
                 try:
                     os.rename(old_dir, new_dir)
@@ -1599,8 +1608,7 @@ class HashtagSystem:
         _save_node_configs(self._node_configs)
 
         # Archive clip folder (preserve evidence, but mark as deleted)
-        safe_name = str(node.name).replace(" ", "_").upper()
-        node_dir = os.path.join(CLIPS_DIR, node_id, safe_name)
+        node_dir = _get_node_dir(node_id, node.name)
         if os.path.isdir(node_dir):
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             archive_dir = node_dir + f"_DELETED_{ts}"
@@ -1964,8 +1972,8 @@ class HashtagSystem:
 
         # Save FP report to the node's directory
         node_obj = self.nodes.get(node_id)
-        safe_name = str(node_obj.name).replace(" ", "_").upper() if node_obj else node_id
-        node_dir = os.path.join(CLIPS_DIR, node_id, safe_name)
+        node_name = node_obj.name if node_obj else node_id
+        node_dir = _get_node_dir(node_id, node_name)
         os.makedirs(node_dir, exist_ok=True)
         fp_report_path = os.path.join(node_dir, "false_positive_log.json")
         fp_log = []

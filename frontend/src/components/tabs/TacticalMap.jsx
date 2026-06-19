@@ -122,18 +122,24 @@ const TacticalMap = ({
 
   useEffect(() => {
     if (showHeatmap) {
-      fetch(`${API_BASE}/api/analytics/heatmap?days=30`)
-        .then(res => res.json())
-        .then(data => {
-          const stats = {};
-          let maxIncidents = 1;
-          for (const [nodeId, incidents] of Object.entries(data)) {
-            stats[nodeId] = incidents.length;
-            if (incidents.length > maxIncidents) maxIncidents = incidents.length;
-          }
-          setHeatmapStats({ stats, maxIncidents });
-        })
-        .catch(console.error);
+      const fetchHeatmap = () => {
+        fetch(`${API_BASE}/api/analytics/heatmap?days=30`)
+          .then(res => res.json())
+          .then(data => {
+            const stats = {};
+            let maxIncidents = 1;
+            for (const [nodeId, incidents] of Object.entries(data)) {
+              stats[nodeId] = incidents.length;
+              if (incidents.length > maxIncidents) maxIncidents = incidents.length;
+            }
+            setHeatmapStats({ stats, maxIncidents });
+          })
+          .catch(console.error);
+      };
+
+      fetchHeatmap();
+      const t = setInterval(fetchHeatmap, 5000);
+      return () => clearInterval(t);
     }
   }, [showHeatmap]);
 

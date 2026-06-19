@@ -262,50 +262,22 @@ def api_events():
 
 @app.route("/api/analytics/heatmap")
 def api_heatmap():
-    days = int(request.args.get("days", 30))
-    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
-    
+    sys_obj = get_system()
+    clips = sys_obj.get_clips()
     heatmap_data = {}
-    journal_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forensic_journal.json")
-    if os.path.exists(journal_path):
-        try:
-            with open(journal_path) as f:
-                journal = json.load(f)
-            
-            for entry in journal:
-                ts = entry.get("timestamp")
-                if ts is not None:
-                    try:
-                        if isinstance(ts, (float, int)):
-                            dt = datetime.datetime.fromtimestamp(ts)
-                        else:
-                            dt = datetime.datetime.fromisoformat(str(ts))
-                        if dt < cutoff:
-                            continue
-                    except Exception:
-                        pass
-                
-                node_id = entry.get("node_id") or entry.get("camera") or "UNKNOWN"
-                if node_id not in heatmap_data:
-                    heatmap_data[node_id] = []
-                    
-                entities = entry.get("entities")
-                if not entities:
-                    entities = [entry]
-                    
-                for e in entities:
-                    bbox = e.get("bbox")
-                    if bbox and len(bbox) == 4:
-                        x, y, w, h = bbox
-                        cx = x + w / 2
-                        cy = y + h / 2
-                        score = e.get("threat_score", 50)
-                        heatmap_data[node_id].append({"x": cx, "y": cy, "value": score})
-                    else:
-                        heatmap_data[node_id].append({"x": 0, "y": 0, "value": e.get("threat_score", 50)})
-        except Exception as e:
-            print(f"[API] Error reading journal for heatmap: {e}")
-            
+    
+    # Use real clip counts instead of static journal parsing.
+    # Group the saved clips by node_id to establish exact frequency
+    for clip in clips:
+        node_id = clip.get("node_id")
+        if not node_id:
+            continue
+        if node_id not in heatmap_data:
+            heatmap_data[node_id] = []
+        
+        # Add an entry for each clip so that `incidents.length` on the frontend works correctly
+        heatmap_data[node_id].append({"x": 0, "y": 0, "value": 50})
+
     return jsonify(heatmap_data)
 
 
@@ -405,23 +377,30 @@ def delete_clip(filename):
 @app.route("/api/clips/clear", methods=["DELETE"])
 @require_role("COMMANDER")
 def clear_all_clips():
-    """Delete all saved threat clips and reset counters."""
+    """Archive all saved threat clips and reset counters."""
     sys_obj = get_system()
     count = 0
+    import datetime
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_dir = os.path.join(CLIPS_DIR, f"_ARCHIVED_{ts}")
+    os.makedirs(archive_dir, exist_ok=True)
+
     for fname in os.listdir(CLIPS_DIR):
+        if fname.startswith("_ARCHIVED_"):
+            continue
         fpath = os.path.join(CLIPS_DIR, fname)
-        if os.path.isfile(fpath):
-            try:
-                os.remove(fpath)
-                count += 1
-            except Exception:
-                pass
+        dest = os.path.join(archive_dir, fname)
+        try:
+            os.rename(fpath, dest)
+            count += 1
+        except Exception:
+            pass
                 
     # Reset node clip counters
     for node in sys_obj.nodes.values():
         node.clips_saved = 0
         
-    return jsonify({"status": "ok", "deleted": count})
+    return jsonify({"status": "ok", "archived": count})
 
 
 @app.route("/api/open_clips_folder", methods=["POST"])
@@ -585,19 +564,8 @@ def admin_acknowledge(node_id):
 @app.route("/api/admin/clear_clips", methods=["POST"])
 @require_role("OPERATOR")
 def admin_clear_clips():
-    """Clear all saved clips from the server."""
-    sys_obj = get_system()
-    import shutil
-    try:
-        shutil.rmtree(sys_obj.clips_dir)
-        os.makedirs(sys_obj.clips_dir, exist_ok=True)
-        # Also clear the forensic journal
-        from hashtag_v2_backend import FORENSIC_JOURNAL_PATH
-        if os.path.exists(FORENSIC_JOURNAL_PATH):
-            os.remove(FORENSIC_JOURNAL_PATH)
-        return jsonify({"status": "ok", "message": "All clips cleared"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    """Clear all saved clips from the server (calls archive logic)."""
+    return clear_all_clips()
 
 
 @app.route("/api/threats/active", methods=["GET"])
